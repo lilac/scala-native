@@ -1,6 +1,8 @@
-# Hi Language Specification — v0.1
+# Hi Language Specification — v0.2
 
 > A statically-typed, expression-oriented, native-compiled language implemented as a new frontend that emits Scala Native's NIR and reuses the entire Scala Native backend.
+
+> **Changes from v0.1.** (1) **Significant newlines**: statements are newline-terminated (§3.4); the `do` effect-marker and tail-`return` value-marker are removed; a block's last expression is its value. (2) **`return` is early function exit** (Java/Rust semantics, §7.13). (3) **`while`/`for` loops** join the MVP (§7.12) — `while c do e`, `for x in e do body`; `do` now introduces loop bodies. (4) **Chain selection ` .m`** (whitespace-preceded dot) replaces the `/.` operator (§4.2). (5) **Array literals** `[1, 2, 3]` (spaced `[`) and the array-argument varargs idiom join the MVP (§5.6); tight `f[T]` remains type application. (6) **Closure → SAM conversion** joins the MVP (§7.6, §8.1), unblocking `Runnable`/virtual threads. (7) A minimal **Hi standard library** `std.io` (`print`/`println`/`printf`) replaces raw libc `printf` in the examples (§10.2). (8) **`try e catch | …`** replaces `try e with` (§7.11), removing the handler-vs-struct-update collision. (9) One-field records need no trailing comma: `(x = 1)` / `(x: Int)` (§5.7). (10) Built-in operator semantics defined (§7.15); the struct GC-restriction lift path documented (§6.3). (11) **Braced arm-blocks**: `match e { | … }` and `try e catch { | … }` — braces delimit the arms, eliminating the dangling-arm ambiguity; `with` no longer introduces match arms. (12) **Unified functional update**: `base with (f = v, …)` is the single form for records, structs, and classes; the spread form `(..base, …)` and the `..` token are removed. (13) Parser-precision fixes: innermost-delimiter newline rule; guards are operator-level expressions; an empty parameter list declares one `Unit` parameter; construction requires a tight `(`; bracket classification is token-level (§5.6 table) — `val a=[1,2,3]` is an array literal, and tight `f(x, y)` is a teaching parse error (no paren-calls) rather than a silent one-tuple application; `given` instances with members use the braced form.
 
 ---
 
@@ -34,7 +36,7 @@ The architectural consequence is leverage: Hi inherits a production-grade, multi
 
 Hi's surface synthesizes ideas from several languages, all reconciled under static typing and native compilation:
 
-- **OCaml-style lightweight function application**: whitespace application `f x y`, with `.`-tightest field access and a dedicated method-chain operator `/.`.
+- **OCaml-style lightweight function application**: whitespace application `f x y`, with `.`-tightest field access and whitespace-sensitive **chain selection** (`x .m`, a dot preceded by whitespace) for fluent method pipelines.
 - **Scala-3-style type system and contextual abstraction**: local/bidirectional type inference (explicitly *not* Hindley-Milner), subtyping by subsumption, traits, `given`/`extension`, and union/intersection types as a frontend-only feature.
 - **Kotlin-style `fun` declarations**: named, curried functions; `fun` is *only* for named declarations, never for lambdas (lambdas use `{ x => e }`).
 - **Swift-style value/reference split**: `struct` is a copied-by-value aggregate with no identity and no inheritance; `class` is a heap-allocated reference type with identity, single inheritance, and trait implementation.
@@ -55,15 +57,15 @@ The following principles are authoritative and shape every later section.
 
 2. **NIR is the contract.** The frontend's output is `Seq[nir.Defn]`. Anything Hi expresses must be expressible as NIR definitions (`Defn.Class`, `Defn.Module`, `Defn.Trait`, `Defn.Define`, `Defn.Declare`, `Defn.Var`, `Defn.Const`) that the existing linker/optimizer/codegen already understand. Hi introduces **no new NIR nodes and no new runtime intrinsics**.
 
-3. **Semantics follow verified backend behavior, not wishful design.** The clearest case is GC safety: the default GC scans heap-object fields *precisely* via an RTTI ref-offset bitmap that covers only bare reference fields, and scans the stack *conservatively*. Therefore a `struct` (value type) in the MVP may hold only primitives and raw pointers (`Ptr`) — never managed references (`class`/`String`/`Array`/ADT). Anything that must hold a managed reference must be a `class`. This is a *language-level* constraint precisely because the backend behavior makes it unsafe otherwise.
+3. **Semantics follow verified backend behavior, not wishful design.** The clearest case is GC safety: the default GC scans heap-object fields *precisely* via an RTTI ref-offset bitmap that covers only bare reference fields, and scans the stack *conservatively*. Therefore a `struct` (value type) in the MVP may hold only primitives, raw pointers (`Ptr`), and nested structs of the same — never managed references (`class`/`String`/`Array`/ADT). Anything that must hold a managed reference must be a `class`. This is a *language-level* constraint precisely because the backend behavior makes it unsafe otherwise.
 
 4. **Local/bidirectional typing, no global unification.** Public and top-level `fun` signatures generally require explicit annotations; local bindings are inferred. Subtyping is resolved by subsumption. There is no principal-type guarantee and no global unification pass (Scala-3 style, *not* Hindley-Milner).
 
 5. **Static typing with native, ahead-of-time compilation.** No JIT, no managed VM. All dispatch resolution, layout, and reachability are decided at link time under the closed-world assumption.
 
-6. **Expression-oriented and immutable-by-default.** `val` is the default binding; `var` is kept minimal (§2). `if`/`match`/blocks are expressions.
+6. **Expression-oriented and immutable-by-default.** `val` is the default binding; `var` is kept minimal (§2). `if`/`match`/blocks are expressions; `while`/`for` loops type to `Unit`; statements are newline-terminated (§3.4).
 
-7. **Small, orthogonal surface.** Each construct has one clear meaning and one lowering. Operators with subtle interactions (`.` vs `/.` vs whitespace application; functional update vs intersection) are given a single precise definition each, and ambiguities are resolved by explicit precedence rather than heuristics.
+7. **Small, orthogonal surface.** Each construct has one clear meaning and one lowering. Operators with subtle interactions (tight `.` vs chain ` .m` vs whitespace application; functional update vs intersection) are given a single precise definition each, and ambiguities are resolved by explicit precedence rather than heuristics.
 
 8. **Erase frontend-only types.** Union (`A | B`) and intersection (`A & B`) types, like Scala 3, exist only in the frontend and are erased at the NIR level; in the MVP they are restricted to reference types.
 
@@ -81,25 +83,28 @@ This table is the authoritative MVP feature boundary. "Judgment call" rows mark 
 
 | Area | In MVP | Notes / Lowering |
 | --- | --- | --- |
-| Bindings | `val`, `var` | `val` immutable (default). `var` **is in the MVP** but kept minimal: a mutable **local** binding only. **Class/struct fields may also be `var`. Object/module-level `var` fields are deferred** (model module mutable state as a `class` with a `var` field). *Judgment call:* including `var` avoids awkward accumulator/loop workarounds. |
+| Bindings | `val`, `var` | `val` immutable (default). `var` **is in the MVP** but kept minimal: a mutable **local** binding only. **Class/struct fields may also be `var`. Object/module-level `var` fields are deferred** (model module mutable state as a `class` with a `var` field). *Judgment call:* `var` plus `while`/`for` (§7.12) cover imperative iteration and accumulators. |
 | Functions | named `fun` (curried, multi-param-list); nullary `fun` permitted | Saturated call → single flat `Defn.Define`; under-application / bare `recv.m` on a non-nullary method → eta-expanded closure. A **nullary** method/getter (zero remaining argument lists) is always saturated and invoked by selection. |
 | Lambdas | `{ x => e }`, `{ x, y => e }`, `{ (x: Int) => e }` | Closures only; `fun` is never used for lambdas. *Judgment call:* multi-param closures are **uncurried** (a single N-arg function object), distinct from curried `fun`. |
 | Declaration kinds | `object`, `trait`, `type` (aliases + ADTs), `struct`, `class`, `impl Trait for Type`, `extension`, `given` | Map to `Defn.Module`/`Defn.Trait`/`Defn.Class` plus `Defn.Define`s. |
-| Value vs reference types | `struct` (value), `class` (reference) | `struct`: no identity, no inheritance, primitives + `Ptr` fields only. `class`: heap, identity, single inheritance + traits, participates in `<:`. |
+| Value vs reference types | `struct` (value), `class` (reference) | `struct`: no identity, no inheritance; fields limited to primitives, `Ptr`, and nested all-primitive/`Ptr` structs (§6.3). `class`: heap, identity, single inheritance + traits, participates in `<:`. |
 | ADTs | sealed ML-style variants `type Option[A] = \| Some of A \| None` | Lower to a reference-backed tagged **class** hierarchy (sealed base `class` + case subclasses); `match` → class-id range-test decision tree. |
-| Pattern matching | `match e with \| pat => e2`, exhaustiveness checking | Sealed-ADT exhaustiveness is a **compile error** (§6.7, §7). |
-| Control flow | `if c then a else b` (`else` REQUIRED), blocks `{ stmt* }` with `val`/`var`/`fun`/`do`/`return` statements **and** keyword-led expressions (`if`/`match`/`try`/`throw`) as direct statements | Expression-oriented; whitespace-insignificant (§3.1, §3.4). Block value = final keyword-led expr or trailing `return`, else `Unit`. |
-| Error handling | `throw expr`, `try e with \| Pattern => handler` | Exceptions only; maps to NIR unwind / `Throwable`. No `finally`. |
-| Tuples & records | tuples `(1, 2)`; named tuples `(x = 1, y = 2)`, one-field `(x = 1,)`; structural record TYPES `(x: Int, y: Int)`, one-field `(x: Int,)` | Structural identity = field-name set + types, order-independent, deterministic canonical layout. |
-| Functional update | `(..base, field = v)` (records) and `base with (field = v)` (structs/classes) | Type-directed sugar over a base of known static type; desugars to full rebuild copying unchanged fields. No row polymorphism. |
+| Pattern matching | `match e { \| pat => e2 … }` (braced arm-block), exhaustiveness checking | Sealed-ADT exhaustiveness is a **compile error** (§6.7, §7). Braces delimit the arms (§5.4). |
+| Control flow | `if c then a else b` (`else` REQUIRED); `while c do e` and `for x in e do body` loops; blocks `{ stmt* }` of newline-terminated statements; `return` = early exit from the enclosing `fun` | Expression-oriented; significant newlines (§3.1, §3.4). Block value = final expression statement, else `Unit`. Loops type to `Unit`; `for` desugars to `foreach` (§7.12). |
+| Error handling | `throw expr`, `try e catch { \| Pattern => handler … }` | Exceptions only; maps to NIR unwind / `Throwable`. No `finally`. |
+| Tuples & records | tuples `(1, 2)`; named tuples `(x = 1, y = 2)`, one-field `(x = 1)`; structural record TYPES `(x: Int, y: Int)`, one-field `(x: Int)` | Structural identity = field-name set + types, order-independent, deterministic canonical layout. Trailing commas permitted, never required (§5.7). |
+| Functional update | `base with (field = v, …)` — one form for records, structs, and classes | Type-directed sugar over a base of known static type; desugars to full rebuild copying unchanged fields. No row polymorphism. |
 | Union / intersection types | `A \| B`, `A & B` | Frontend-only / erased; **restricted to reference types**. Intersection over structural records = field-set union; same-name/different-type collision is a compile error. |
 | Generics | `[A, B]`, type application `List[Int]`, arrows `A -> B -> C` (right-assoc) | First-order generics only; **upper bounds only** (`[A <: Bound]`); **invariant**; **no variance, no context bounds**. |
-| Operators | `.` (tightest, field/method select), `/.` (method-chain, application precedence, left-assoc), whitespace application over bounded args | Unbounded args (`if`/`match`/`throw`/`try`/infix) must be parenthesized. |
+| Operators | `.` (tightest, field/method select), chain selection ` .m` (whitespace-preceded dot; application precedence, left-assoc), whitespace application over bounded args | Unbounded args (`if`/`match`/`while`/`for`/`throw`/`try`/`return`/infix) must be parenthesized. |
+| Arrays & varargs idiom | array literals `[1, 2, 3]` (spaced `[`); `xs.get i`, `xs.set i v`, `xs.length` | Lower to `Op.Arrayalloc`/`Op.Arrayload`/`Op.Arraystore`/`Op.Arraylength` (§8.9). "Varargs" = pass one array literal: `sum [1, 2, 3]`. Tight `f[T]` remains type application (§5.6). |
+| Closure → SAM conversion | a closure checked against a single-abstract-method trait/interface | Synthesized closure class implements that interface instead of `scala.FunctionN` (§7.6, §8.1); covers javalib functional interfaces (`Runnable`, `Comparator`, …). |
 | Modules | `package a.b`, `import a.b.C` | Map to NIR `Global.Top` naming. |
 | Entry point | `object Main { fun main (args: Array[String]): Unit = ... }` | Lowers to NIR module `Main$` exposing the static `main([Ljava.lang.String;)Unit` discovered via `nir.Rt.ScalaMainSig`. |
 | String literals | plain `"..."`; **C-string literal `c"..."`** (the one prefixed-literal exception) | `c"..."` has type `CString` (≈ `Ptr[Byte]`), for libc interop (§3.6). No interpolation, no triple-quoted/raw strings. |
 | Runtime / stdlib reference | `java.lang.{Object,String,Class,Throwable,Thread}`, `scala.scalanative.runtime.*`, `scala.FunctionN`, primitive box classes, typed array classes | Referenced by canonical name from published nativelib/javalib/scalalib NIR; linker prunes to reachable set. |
-| Concurrency | OS threads (pthreads) | Virtual threads are an opt-in *reuse* of javalib, not a frontend feature. |
+| Concurrency | OS threads (pthreads); virtual threads via javalib reuse | Closure→SAM conversion lets a Hi closure satisfy `Runnable`, so `Thread`/`Thread.ofVirtual` are ergonomically callable (§7.6, §9.6 note). |
+| Hi standard library (minimal) | `std.io.{print, println, printf}` | Hi-authored sources shipped with the compiler, compiled to NIR; delegate to javalib `System.out`/`String.format` (§10.2). `printf` takes `(fmt: String) (args: Array[Object])`; format semantics = `java.util.Formatter`. |
 
 ### 2.2 Out of Scope (explicitly deferred)
 
@@ -108,15 +113,14 @@ This table is the authoritative MVP feature boundary. "Judgment call" rows mark 
 | **Row polymorphism** | Functional update is type-directed sugar over a base of *known* full static type. A generic "update any record preserving the rest" function is not expressible without row variables. |
 | **Algebraic effects / user-defined effect handlers** | The backend *has* delimited continuations, but the MVP surface exposes none. Error handling is exceptions only. |
 | **Value-backed enums** | ADTs lower to a reference-backed tagged class hierarchy; unboxed/value-backed enum representations are deferred. |
-| **Value structs holding managed references** | GC safety rule: a managed ref embedded in a by-value struct that becomes a field of a heap object is not scanned precisely and may be collected prematurely. Stack-only value structs with refs would need per-shape RTTI; deferred. |
+| **Value structs holding managed references** | GC safety rule: a managed ref embedded in a by-value struct that becomes a field of a heap object is not scanned precisely and may be collected prematurely. Stack-only value structs with refs would need per-shape RTTI; deferred. *Lift path (post-MVP):* recurse `MemoryLayout.referenceFieldsOffsets` into nested `StructValue`s (the GC markers already walk arbitrary offset arrays), or flatten ref-carrying structs into their containers in the frontend; `Array[struct-with-refs]` stays deferred either way (§6.3). |
 | **Higher-kinded types; variance; lower bounds; context bounds** | Generics are first-order, invariant, upper-bounds-only. Contextual requirements use explicit `using` parameters. |
 | **Macros / compile-time metaprogramming** | No metaprogramming surface. |
-| **`async`/`await`; `while`/`for`/`return`** | Concurrency is via OS threads (and optionally reused virtual threads). Loops use recursion + expression blocks. |
+| **`async`/`await`; `break`/`continue`; non-local `return` from closures** | Concurrency is via OS threads and reused virtual threads — no built-in async surface. `while`/`for` and early-exit `return` are in the MVP (§7.12, §7.13); loop `break`/`continue` and `return` crossing a closure boundary are deferred (keywords reserved, §3.5). |
 | **Implicit conversions** | `given`/`extension` provide contextual abstraction, but implicit *coercion* between unrelated types is not in the MVP. |
 | **Union/intersection over value structs** | Unions and intersections are restricted to reference types. |
-| **User-defined symbolic/backtick operators; list literals / indexing `xs[i]`** | The operator lexicon is a fixed closed set; `[...]` in value position is reserved for post-MVP. |
-| **Idiomatic native collections API (`List`/`Array`/`Map` with `map`/`filter`/`fold`/`foreach`)** | **Decided-deferred.** Hi *will* offer a native collections surface, but it is to be **built on Scala Native's existing collection library** (reachable via the `scalalib` NIR Hi already links — see §10) rather than reinvented. Deferring it keeps the MVP a clean vertical slice; until it lands, only the ADT/recursion forms in §9.3/§9.6 are guaranteed expressible, and the fluent collection-pipeline from the original Hi tour is **not** part of the MVP examples. |
-| **Closure → Java-SAM conversion** | **Decided-deferred (nice-to-have).** MVP lowers closures to `scala.FunctionN` only. Letting a Hi closure satisfy a Java functional interface (`Runnable`, `Comparator`, …) is desirable for ergonomic javalib / virtual-thread interop, but the SAM-synthesis rule is deferred if it proves costly for the MVP. Consequence: virtual threads remain reusable via the backend but are not yet ergonomically callable from idiomatic Hi closures (a `Runnable` must be supplied through an explicit adapter until this lands). |
+| **User-defined symbolic/backtick operators; indexing sugar `xs[i]`** | The operator lexicon is a fixed closed set. Array *literals* are in the MVP via the spaced-`[` rule (§5.6); *tight* `xs[i]` indexing remains reserved (it parses as type application and fails — by design). Use `xs.get i` (§6.2). |
+| **Idiomatic native collections API (`List`/`Array`/`Map` with `map`/`filter`/`fold`/`foreach`)** | **Decided-deferred.** Hi *will* offer a native collections surface, but it is to be **built on Scala Native's existing collection library** (reachable via the `scalalib` NIR Hi already links — see §10) rather than reinvented. Deferring it keeps the MVP a clean vertical slice; until it lands, only the ADT/recursion/loop forms of §9 are guaranteed expressible, and the fluent collection-pipeline from the original Hi tour is **not** part of the MVP examples. (`for x in e do …` already works with any type exposing a `foreach`, §7.12.) |
 
 ---
 
@@ -126,9 +130,9 @@ These rules are purely *frontend* concerns: they determine how source text is to
 
 ### 3.1 Source representation
 
-Hi source is UTF-8 text; the lexer operates over Unicode scalar values. Only the ASCII subset is significant to the grammar (keywords, operators, delimiters); non-ASCII letters are permitted inside identifiers and string/char literals. Line terminators are LF (`U+000A`) or CRLF (`U+000D U+000A`); a bare CR is normalized to a line terminator. Space (`U+0020`) and horizontal tab (`U+0009`) are *non-terminating* whitespace.
+Hi source is UTF-8 text; the lexer operates over Unicode scalar values. Only the ASCII subset is significant to the grammar (keywords, operators, delimiters); non-ASCII letters are permitted inside identifiers and string/char literals. Line terminators are LF (`U+000A`) or CRLF (`U+000D U+000A`); a bare CR is normalized to a line terminator. Space (`U+0020`) and horizontal tab (`U+0009`) are token separators.
 
-> **Judgment call (whitespace is insignificant — ML-style).** Hi is **not** layout/indentation-sensitive and is **not** newline-terminated. *All* whitespace — spaces, tabs, newlines, and `;` — is insignificant: it separates tokens but never carries grammatical meaning. There is no significant-newline inference (no Scala-style `NL` synthesis). The only structural signals are the brackets `{ }`, `( )`, `[ ]` and the **statement keywords** that introduce every statement (§3.4). A `;` is accepted as optional cosmetic whitespace (it may visually separate one-liners) but is never required and never changes meaning. Indentation never opens or closes a scope.
+> **Judgment call (significant newlines; no layout).** Hi is newline-terminated but **not** indentation-sensitive: a newline may end a statement (per the §3.4 rules), while indentation never opens or closes a scope (no offside rule, no layout blocks). Spaces and tabs separate tokens and additionally feed exactly four whitespace-*sensitivity* rules: prefix-vs-infix `-` (§4.3); tight-`.` selection vs chain-` .m` selection (§4.2); tight-`[` type application vs spaced-`[` array literal (§5.6); tight-`(` construction vs spaced-`(` application argument (§5.6). A `;` is an explicit statement separator equivalent to a significant newline (useful for one-liners), never required.
 
 ### 3.2 Comments
 
@@ -139,7 +143,7 @@ BlockComment  ::= "/*" { any-char | BlockComment } "*/"
 
 - `//` begins a line comment running to (but not including) the next line terminator.
 - `/* ... */` is a **nestable** block comment.
-- A comment never produces a token and, like all whitespace, is grammatically insignificant (§3.1): `a /* \n */ b` is exactly `a b` (an application of `a` to `b`), since newlines carry no meaning. Statement boundaries come from statement keywords (§3.4), not from comments or line breaks.
+- A comment never produces a token. A line comment ends at (and does not consume) the line terminator. A block comment that *contains* a line terminator counts as one for §3.4's statement-termination rules; a single-line block comment is plain inter-token whitespace (`a /* x */ b` is the application `a b`).
 
 ### 3.3 Identifiers and the casing convention
 
@@ -160,49 +164,43 @@ This convention removes lookahead ambiguity: in `f x`, `f` is necessarily a valu
 
 **No user-defined symbolic operators.** The operator lexemes are a fixed, closed set (§4). Symbolic/backtick operator definitions are out of MVP scope; this keeps the precedence table total and statically known.
 
-### 3.4 Statement boundaries (keyword-introduced statements; no separator token)
+### 3.4 Statement termination (significant newlines)
 
-Because whitespace — including newlines — is insignificant (§3.1), Hi does **not** infer statement boundaries from line breaks and does **not** require a separator token (`;`) between statements. Instead, the language maintains a single invariant:
+Statements are **newline-terminated**. A token filter between the lexer and the parser (one-token lookahead, exactly as Scala 3 synthesizes `NL`) decides which line breaks are statement terminators; the parser then sees an explicit terminator token `term`. Any expression may stand as a statement — there is no leading-keyword requirement and no `do`/`return` wrapping.
 
-> **Statement-leading invariant.** *Every statement begins with a keyword.* That leading keyword is the statement's left boundary, and — because no statement can begin mid-application — it is also the token at which the previous statement's greedy whitespace-application stops. The parser ends a statement at the next statement-leading keyword or at the enclosing block closer `}`.
+> **Statement-termination rules (normative).**
+>
+> 1. **Suppression contexts (innermost delimiter wins).** Newline significance is decided by the *innermost* enclosing delimiter: inside `( )` and `[ ]`, newlines are plain whitespace — multi-line constructions `T(…)`, argument groups, and array literals need no continuation marks — while inside `{ }` bodies and at top level, each newline is a candidate terminator. A brace body nested within parentheses regains newline significance.
+> 2. **Continuation by previous token.** A candidate newline is suppressed when the previous token cannot end a statement: any infix or prefix operator, `,` `=` `=>` `.` `..` `:` `<:` `@`, an opening bracket, the arm bar `|`, or a keyword that requires a continuation (`if` `then` `else` `match` `try` `catch` `with` `of` `while` `for` `in` `do` `throw` `val` `var` `fun` `type` `import` `package` `using` `given` `impl` `extension` `struct` `class` `trait` `object`). (`return` *may* end a statement — a bare `return` returns `()`; its operand, if any, must start on the same line.)
+> 3. **Continuation by next token.** A candidate newline is suppressed when the next token cannot begin a statement: `then` `else` `catch` `with` `of` `in` `do` `=>` `=` `<:` `,` `)` `]` `}`, the arm bar `|`, any infix-only operator (`*` `/` `%` `^` `==` `!=` `<` `<=` `>` `>=` `&&` `||`), or a **leading `.`** (the multi-line chain form, §4.2). A line starting with `+` `-` `!` `(` `[` `{`, an identifier, a literal, or a statement-capable keyword begins a **new** statement.
+> 4. **Application never crosses a terminator.** The arguments of a whitespace application must lie on the same logical line as the callee. For a multi-line call, parenthesize the whole call (rule 1 then suppresses the inner newlines) or pass a brace-delimited closure/block whose `{` sits on the call line (braces self-delimit and may span lines).
 
-**Statement-leading keywords** fall into two groups:
-
-```
-binders / markers:      val   var   fun   do   return
-keyword-led expressions:  if   match   try   throw
-```
-
-- `val` / `var` — immutable / mutable local binding (`val x = e`, `var x = e`).
-- `fun` — a nested function declaration.
-- `do e` — an expression evaluated for its effects, value discarded; `do e` ≡ `val _ = e`. Use it for any **value-token-led** effect (`do printf c"hi\n"`) and for a block/closure used as a statement (see the caveat below).
-- `return e` — **tail value-marker** (decision A): supplies the value of the enclosing block or function body. It must be the **last** statement of its block; a `return` followed by further statements is a *"dead code after `return`"* compile error. A block with no `return` has value `Unit`. `return` does **not** perform early exit / non-local control flow (deferred, §11); it is purely the explicit spelling of "the block's result is this".
-
-**Keyword-led expressions are statements directly — no `do`/`return` needed.** Because `if`, `match`, `try`, and `throw` already begin with a keyword, they satisfy the statement-leading invariant on their own and may stand as statements *without* a `do`/`return` wrapper:
+**Examples (normative).**
 
 ```
-if ready then launch () else wait ()      // statement; value = Unit unless it is the block tail
-match cmd with | Quit => shutdown () | _ => ()
-throw NotFound(key)                        // diverges
+setup ()
+if verbose then log "ready" else ()
+result                                    // bare expression statements are legal
+
+val n = a +                               // '+' cannot end a statement: continues
+        b
+
+xs.filter { x => x > 0 }
+  .map double                             // leading '.': chain continuation (§4.2)
+  .sum
+
+run tasks { t => exec t }                 // same line: closure is an argument
+run tasks
+{ t => exec t }                           // NEW statement: a bare block (value discarded; compiler warns)
 ```
 
-When such an expression is the **last** element of a block, it *is* the block's value (no `return` required); when a non-final element, its value is discarded (like an implicit `do`). This is the relaxation that removes the awkward `return if …` / `return match …`: write the bare keyword-led form.
+**Block value.** A block's value is the value of its **final** statement when that statement is an expression; otherwise `Unit` (§5.4, §7.3). Non-final expression statements are evaluated for effect and their values discarded — a compiler should warn when the discarded type is not `Unit`. Tail-position `return` is unnecessary: write the bare expression. `return` itself is **early exit** from the enclosing `fun` (§7.13).
 
-> **Caveat — blocks and closures are NOT keyword-led.** `{ … }` (block) and `{ x => … }` (closure) begin with the delimiter `{`, which is a *bounded argument* (§4.3) and therefore can be slurped by a preceding application. A bare block/closure statement would be ambiguous (`compute () { return 5 }` would apply `compute ()`'s result to the block). Hence a block/closure used as a statement **must** be introduced by `do` (effect) or `return`/`val` (value). Only the four keyword-led *expression* forms above are exempt.
+**Known hazards (documented; Kotlin/Swift-style).** A line beginning with `(` or `[` is always a *new* statement, never a continuation of the previous application — wrap the whole call in parentheses to break long argument lists. A line beginning with `+`/`-` is a new (prefix-operator) statement — leave the operator at the end of the previous line instead.
 
-**Why no `;` is needed.** Since every statement starts with one of `val`/`var`/`fun`/`do`/`return`/`if`/`match`/`try`/`throw`, adjacent statements like
+> **`;` is an explicit separator.** `val a = 1; val b = 2` puts two statements on one line; `;` is exactly equivalent to a significant newline and never required.
 
-```
-do  setup ()
-if  verbose then log "ready" else ()
-return result
-```
-
-parse unambiguously: `setup`'s application stops at `if`; the `if` is a complete statement; `return` ends the block. No newline significance, no separator token.
-
-> **`;` is optional cosmetic whitespace.** A `;` may be written between statements purely for one-line readability (`do a; do b; return c`); the lexer treats it like any other whitespace — never required, never changes a parse. There is **no bare value-token-led expression statement**: a value-led effect uses `do`, and a value-led block result uses `return`. (Keyword-led expressions need neither, per the rule above.)
-
-> **Judgment call (trailing commas).** Trailing commas are permitted in tuples, named tuples, argument lists, parameter lists, and type-argument lists. The one-field named tuple `(x = 1,)` and one-field named-tuple type `(x: Int,)` **require** the trailing comma (§3.5, §5).
+> **Judgment call (trailing commas).** Trailing commas are permitted in tuples, named tuples, array literals, argument lists, parameter lists, and type-argument lists — and never required. In particular the one-field record forms are simply `(x = 1)` and `(x: Int)`: they are unambiguous because bare assignment is forbidden inside `( )` grouping (§5.4, §5.7) and arrow domains are unlabeled (§5.9).
 
 ### 3.5 Keywords
 
@@ -211,16 +209,18 @@ parse unambiguously: `setup`'s application stops at `if`; the `if` is a complete
 ```
 val   var   do   return   fun   object   trait   type   struct   class   impl
 extension   given   using   with   if   then   else   match   import   package
-throw   try   of   true   false
+throw   try   catch   of   while   for   in   true   false
 ```
 
-- `val`/`var`/`fun`/`do`/`return` — the **statement-leading binders/markers** (§3.4); `do e` ≡ `val _ = e` (value-led effect as statement); `return e` is the tail value-marker (last statement = block/body value; no early exit). The **keyword-led expression** forms `if`/`match`/`try`/`throw` are also statement-leading and may stand as statements with no `do`/`return` wrapper (§3.4).
-- `class`/`struct` — reference/value split. `struct` is a by-value aggregate restricted to primitives + `Ptr`.
+- `val`/`var` — immutable / mutable local binding; `fun` — function declarations. Statements are newline-terminated (§3.4) and any expression may stand as a statement.
+- `return` — **early exit** from the enclosing `fun` with the given value (`()` if omitted); type `Nothing` (§7.13). It never exits merely a block, and may not cross a closure boundary in the MVP.
+- `while c do e` / `for x in e do body` — loops (§7.12); **`do` introduces a loop body** (its only role).
+- `class`/`struct` — reference/value split. `struct` is a by-value aggregate restricted to primitives, `Ptr`, and nested such structs.
 - `impl` — `impl Trait for Type { ... }`.
 - `extension` — `extension (x: T) { ... }`.
 - `given`/`using` — contextual instances and contextual parameters.
-- `with` — struct/class functional update `base with (...)` and the `match … with`/`try … with` continuation.
-- `throw`/`try` — the only error-handling forms.
+- `with` — functional update `base with (...)` (records/structs/classes, §6.6) and parent lists (`<: A with B`). `match` arms live in a braced arm-block (§5.4), not behind `with`.
+- `throw`/`try`/`catch` — the only error-handling forms: `try e catch { | P => h … }` (§7.11).
 - `of` — ADT variant payload.
 - `true`/`false` — boolean literals lexed as keywords.
 
@@ -229,8 +229,8 @@ throw   try   of   true   false
 **Reserved-for-future keywords** (lexed as keywords, rejected by the parser with a "reserved for future use" diagnostic):
 
 ```
-enum   effect   handle   resume
-while   for   yield   lazy   inline   mutable   as
+enum   effect   handle   resume   break   continue
+yield   lazy   inline   mutable   as
 ```
 
 > **Judgment call.** `then`/`else` are full keywords (required by `if c then a else b`). `extends`/`derives` are *not* reserved; inheritance uses the `<:` clause (§5).
@@ -260,7 +260,7 @@ BoolLit    ::= "true" | "false"
 - **Floats.** A literal with a `.`, an exponent, or an `f`/`d` suffix is floating point. Default literal type is `Double`. `f`/`F` → `Float`; `d`/`D` → `Double`.
 - **Char.** Single-quoted; type `Char` (NIR `Char`, 16-bit unsigned).
 - **String.** Double-quoted; type `String`, lowered to `java.lang.String` (the canonical 4-field layout `value, offset, count, cachedHashCode`). **No string interpolation; no triple-quoted/raw strings.**
-- **C-string.** `c"..."` is the **one prefixed-literal form in the MVP**. It has type `CString` (a libc-interop alias for `Ptr[Byte]`), lowering to a NUL-terminated byte sequence reachable as a raw pointer. It exists so the example programs can call `scala.scalanative.libc` functions; it is *not* a general interpolation mechanism.
+- **C-string.** `c"..."` is the **one prefixed-literal form in the MVP**. It has type `CString` (a libc-interop alias for `Ptr[Byte]`), lowering to a NUL-terminated byte sequence reachable as a raw pointer. It exists for direct libc/FFI interop (`scala.scalanative.libc`); the §9 examples use Hi's `std.io` (§10.2) instead. It is *not* a general interpolation mechanism.
 - **Bool.** `true`/`false`, type `Bool`.
 - **Escapes** (char and string): `\n \r \t \b \f \\ \" \' \0`, plus `\uXXXX`. Unknown escapes are a lexical error.
 
@@ -272,13 +272,13 @@ BoolLit    ::= "true" | "false"
 
 ### 4.1 The single normative precedence table
 
-This is **the** precedence table (the grammar of §5 encodes exactly this; where §5 shows productions, they are the operational realization of these levels). **Lower number = binds tighter (tightest first).** Whitespace application and `/.` share one left-associative level.
+This is **the** precedence table (the grammar of §5 encodes exactly this; where §5 shows productions, they are the operational realization of these levels). **Lower number = binds tighter (tightest first).** Whitespace application and chain selection ` .m` share one left-associative level.
 
 | # | Level | Forms | Associativity |
 |---|-------|-------|---------------|
 | 1 | **Field/method selection (TIGHTEST)** | `a.b` (field or single method selection) | left |
 | 2 | **Construction / type application** | `T(...)` (nominal struct/class/variant build), `T[..]` type application | left |
-| 3 | **Whitespace application *and* method-chain `/.`** | `f x`, `f x y` (curried); `lhs /. m a b` | **left** (one shared level) |
+| 3 | **Whitespace application *and* chain selection ` .m`** | `f x`, `f x y` (curried); `lhs .m a b` (whitespace-preceded dot, §4.2) | **left** (one shared level) |
 | 4 | **Prefix (unary) operators** | `-e`, `+e`, `!e` | prefix (non-assoc) |
 | 5 | **Multiplicative** | `*` `/` `%` | left |
 | 6 | **Additive** | `+` `-` | left |
@@ -287,7 +287,7 @@ This is **the** precedence table (the grammar of §5 encodes exactly this; where
 | 9 | **Equality** | `==` `!=` | left (non-chaining) |
 | 10 | **Logical and** | `&&` | left (short-circuit) |
 | 11 | **Logical or** | `\|\|` | left (short-circuit) |
-| 12 | **Control / leaf forms (LOOSEST)** | `if … then … else …`, `match … with …`, `throw e`, `try e with …` | n/a (unbounded; must be parenthesized to be an operand of 1–11) |
+| 12 | **Control / leaf forms (LOOSEST)** | `if … then … else …`, `match e { … }`, `throw e`, `try e catch { … }`, `while … do …`, `for … in … do …`, `return e?` | n/a (unbounded; must be parenthesized to be an operand of 1–11) |
 
 Notes:
 
@@ -305,19 +305,21 @@ type application  (List[Int], F[G[X]])
 atoms (tightest)
 ```
 
-The lexer emits one token for each of `&`/`|`/`->`; the parser selects the type interpretation by context. In *expression* contexts `|` appears only as the ADT-variant bar and the match/try-arm bar; `&` never appears (intersection is a type; struct update uses `with`/`(..base, …)`).
+The lexer emits one token for each of `&`/`|`/`->`; the parser selects the type interpretation by context. In *expression* contexts `|` appears only as the arm bar inside arm-blocks (§5.4); `&` never appears (intersection is a type; functional update uses `with`, §6.6).
 
-### 4.2 Selection (`.`), construction, and the `/.` chain
+### 4.2 Selection (tight `.`), construction, and chain selection (` .m`)
 
-- **`.` is tightest (level 1).** `a.f x.g y` parses as `(a.f) (x.g) y`: `a.f` is a selection yielding a callable, then whitespace-applied to args `x.g` and `y`.
-- **`.` selects; it never calls-with-parens.** There is **no** `a.f(args)` paren-call surface. *All* method arguments arrive via whitespace application (`a.f x`) or the chain operator. A field or **nullary** method/getter `a.f` is invoked by the selection alone; a non-nullary method named bare (`recv.m` with no args) eta-expands to a closure (§6, §7). There is no `a.f()` spelling: a nullary call is written `a.f`.
+**Whitespace decides between the two dots.** A `.` that is *not* preceded by whitespace (and is not inside a float literal, §3.6) is **selection** — level 1, tightest — binding to the immediately preceding primary. A `.` that *is* preceded by whitespace or a newline (and followed by a `LOWER_ID`) is **chain selection** — level 3, application precedence, left-associative, sharing the single application level with whitespace application.
+
+- **Tight `.` is tightest (level 1).** `a.f x.g y` parses as `(a.f) (x.g) y`: `a.f` is a selection yielding a callable, then whitespace-applied to args `x.g` and `y`.
+- **`.` selects; it never calls-with-parens.** There is **no** `a.f(args)` paren-call surface. *All* method arguments arrive via whitespace application (`a.f x`) or chain selection. A field or **nullary** method/getter `a.f` is invoked by the selection alone; a non-nullary method named bare (`recv.m` with no args) eta-expands to a closure (§6, §7). There is no `a.f()` spelling: a nullary call is written `a.f`.
 - **Construction is level 2, tighter than application and at-or-tighter than `.`.** `T(a).f` parses as `(T(a)).f` (construct, then select).
-- **`/.` is at application precedence (level 3), left-associative, sharing the single application level with whitespace application.** Operationally, after a primary is parsed, a left-to-right loop consumes *application tails*: a bounded argument applies the current callee to one more argument; a `/.`-step makes the accumulated value the **receiver** and selects a named method, whose subsequent bounded arguments (further tails) become its arguments. This realizes both `foo bar /. m` and `3 /. add 4 /. times 5 /. neg` as genuinely same-level left-associative.
+- **Chain selection ` .m` re-threads the accumulated value.** Operationally, after a primary is parsed, a left-to-right loop consumes *application tails*: a bounded argument applies the current callee to one more argument; a ` .m` step makes the accumulated value the **receiver** and selects method/extension `m`, whose subsequent bounded arguments (further tails) become its arguments. This realizes both `foo bar .m` and `3.add 4 .times 5 .neg` as genuinely same-level left-associative.
 
 **Worked example (normative).**
 
 ```
-3 /. add 4 /. times 5 /. neg
+3.add 4 .times 5 .neg
 ```
 
 parses (left-assoc, application precedence) and is **equivalent in call structure** to:
@@ -331,7 +333,17 @@ parses (left-assoc, application precedence) and is **equivalent in call structur
 
 `add`/`times`/`neg` resolve as **methods/extensions on the receiver's type**, never as free functions. Each step's accumulated result becomes the next receiver.
 
-> **Normative note (the `.`-desugaring is call structure, not a re-lexable string).** The grouping `((3.add 4).times 5).neg` describes the **call structure** with explicit parentheses; it is **not** a surface string you can re-flatten. In particular, the flat surface `3.add 4.times 5.neg` parses *differently*: `.` is tightest and attaches only to the immediately preceding primary, so `4.times` selects on `4`, not on `(3.add 4)`. Only `/.` re-threads the accumulated result as the next receiver. Always read the desugaring with the explicit grouping parentheses shown.
+> **Normative note (spacing matters).** In the flat string `3.add 4.times 5.neg` the later dots are *tight*, so `4.times` selects on `4`, not on `(3.add 4)` — a different call shape, which typically fails arity/type checking rather than silently misbehaving. Write a space (or newline) before every chaining dot. Only a *whitespace-preceded* `.` re-threads the accumulated result as the next receiver.
+
+A newline before the dot is the idiomatic multi-line pipeline (§3.4 rule 3):
+
+```
+xs.filter { x => positive x }
+  .map double
+  .sum
+```
+
+> *(History: v0.1 spelled chain selection as a dedicated `/.` operator; ` .m` is its exact respelling — same precedence, associativity, resolution, and lowering.)*
 
 ### 4.3 The bounded-application rule
 
@@ -341,13 +353,14 @@ Whitespace application (level 3) applies a callable to a sequence of **bounded a
 BoundedArg ::= Literal                     // 1, 3.0, 'c', "s", c"s", true
              | LOWER_ID | UPPER_ID         // identifiers (incl. nullary names)
              | "(" Expr ")"                // parenthesized expression (any expr)
-             | Tuple | NamedTuple          // (1, 2)   (x=1, y=2)   (x=1,)
+             | Tuple | NamedTuple          // (1, 2)   (x=1, y=2)   (x=1)
+             | ArrayLit                    // [1, 2, 3]   (spaced '[', §5.6)
              | Construction                 // T(...)  nominal struct/class build
              | Closure                      // { x => e }  { x, y => e }  { (x:T) => e }
-             | Block                         // { stmt* return? }  or  { expr }
+             | Block                         // { stmt* }
 ```
 
-Everything else — `if`/`match`/`throw`/`try` and any **infix** or **prefix** operator expression — is **unbounded** and must be parenthesized to be used as an argument. **Type-argument lists `[T]` are NOT bounded arguments**: a `[...]` in argument position is always type application bound to the immediately preceding callee, never a standalone argument (§5).
+Everything else — `if`/`match`/`while`/`for`/`throw`/`try`/`return` and any **infix** or **prefix** operator expression — is **unbounded** and must be parenthesized to be used as an argument. **Tight vs spaced `[`:** a `[` glued (no whitespace) to an identifier is a type-argument list bound to that callee — never a standalone argument; any other `[` opens an **array literal**, which *is* a bounded argument (full token-level classification table in §5.6). **Arm-blocks are not bounded arguments:** a `{` whose first significant token is `|` is an **arm-block** (§5.4), legal only after `match e` or `catch`; greedy application stops in front of it, which is what lets `match f x { | … }` parse with `f x` as the scrutinee.
 
 **An application result used as an argument must be parenthesized.** `f (describe x)`, not `f describe x` (which is `(f describe) x`).
 
@@ -360,9 +373,11 @@ g a (b + c)                                // (b + c) bounded by its parens
 h (if p then 1 else 2)                     // if-expr must be parenthesized
 map xs { x => x + 1 }                      // closure is bounded
 make Point(x=1, y=2)                       // T(...) is bounded
-3 /. add 4 /. times 5 /. neg               // == ((3.add 4).times 5).neg  == -35
-a.f x.g y        ===  (a.f) (x.g) y        // '.' tighter than application
-print (x = 1,)                             // one-field named-tuple arg
+3.add 4 .times 5 .neg                      // == ((3.add 4).times 5).neg  == -35
+sum [1, 2, 3]                              // spaced '[': array-literal argument
+map[Int] xs                                // tight '[': type application, then application
+a.f x.g y        ===  (a.f) (x.g) y        // tight '.' tighter than application
+print (x = 1)                              // one-field named-tuple arg
 a + { x => e }                             // closure is a bounded operand (not parenthesized)
 ```
 
@@ -373,12 +388,12 @@ f if p then a else b        // ERROR: if is unbounded -> f (if p then a else b)
 map xs x => x + 1           // ERROR: bare closure body -> map xs { x => x + 1 }
 f throw e                   // ERROR: throw unbounded -> f (throw e)
 f describe x                // parses (f describe) x; for f applied to (describe x) write f (describe x)
-h match e with | _ => 0     // ERROR: match unbounded -> h (match e with | _ => 0)
+h match e { | _ => 0 }      // ERROR: match unbounded -> h (match e { | _ => 0 })
 ```
 
 > **Judgment call (ambiguous `f -1`).** `f -1` (space before `-`, none after) is **rejected as ambiguous**: write `f (-1)` for the negative-literal argument or `f - 1` for subtraction. `a - 1` (spaces around) is always subtraction.
 
-> **Judgment call (`/.` maximal munch).** `/.` is a single maximal-munch token; it is preferred when the two characters are adjacent. `a / .5` (with a space) is division by `0.5`.
+> **Judgment call (no leading-dot floats).** There are no leading-dot float literals (§3.6): write `0.5`, never `.5`. A whitespace-preceded `.` is chain selection (§4.2), so `xs .5` and `a / .5` are parse errors (chain selection expects a `LOWER_ID`); write `a / 0.5`.
 
 > **Float dot vs selection.** A `.` immediately preceded by digits and immediately followed by a digit is part of a `FloatLit` (`3.0`). Otherwise `.` is selection (`3.field` ≡ `(3).field`).
 
@@ -390,7 +405,7 @@ h match e with | _ => 0     // ERROR: match unbounded -> h (match e with | _ => 
 
 This section is the **single source of truth for Hi's surface syntax**. Where any *earlier* prose (§1–§4) conflicts with a production here, the production wins. The grammar is a Pratt-style expression parser over an LL/LALR(1)-friendly item grammar with explicit precedence (§4).
 
-> **Disambiguation prose within §5 is normative.** Some productions are deliberately permissive and are resolved by a bounded-lookahead *procedure* given in prose alongside them — specifically §5.6's `block_body` selection and closure-vs-block scan, and §5.7's leading-`(` resolution. Where such a procedure specifies how to resolve an otherwise-ambiguous parse, it **takes precedence over the literal grammar**; implementers MUST follow the procedure, not naïve EBNF derivation. (This is the same reason §4's precedence table, not the flat `infix_expr` production, governs operator associativity.)
+> **Disambiguation prose within §5 is normative.** Some productions are deliberately permissive and are resolved by a bounded-lookahead *procedure* given in prose alongside them — specifically §5.4's arm-block recognition and closure-vs-block scan, §5.6's tight-vs-spaced `[`/`(` resolution, and §5.7's leading-`(` resolution. Where such a procedure specifies how to resolve an otherwise-ambiguous parse, it **takes precedence over the literal grammar**; implementers MUST follow the procedure, not naïve EBNF derivation. (This is the same reason §4's precedence table, not the flat `infix_expr` production, governs operator associativity.)
 
 ### 5.1 Notation
 
@@ -399,7 +414,7 @@ This section is the **single source of truth for Hi's surface syntax**. Where an
 - `X*`, `X+`, `X?` — repetition / optionality. `( ... )` — metagrouping. `"..."` — literal terminal.
 - `sepBy(X, s)` = `( X ( s X )* )?`; `sepBy1(X, s)` = `X ( s X )*`. Trailing separators per §3.4.
 - Lexical terminals (from §3): `LOWER_ID`, `UPPER_ID`, `INT_LIT`, `FLOAT_LIT`, `STRING_LIT`, `CSTRING_LIT`, `CHAR_LIT`, `BOOL_LIT`, `UNIT_LIT` (`()`).
-- **No statement-terminator token.** Whitespace (including newlines) is insignificant (§3.1) and there is no `NL`/`term` token. Statements are delimited because each begins with a statement-leading keyword (`val`/`var`/`fun`/`do`/`return` or a keyword-led expression `if`/`match`/`try`/`throw`) and the parser stops application at the next such keyword or at a block closer `}` (§3.4). An optional `;` may appear between statements as cosmetic whitespace; it is lexed and discarded.
+- **`term`** — the statement terminator: a significant newline per the §3.4 filter, or an explicit `;`. Newlines inside `( )`/`[ ]` are never `term`. `CHAIN_DOT` is the whitespace-preceded `.` of §4.2 (the tight `.` appears in `postfix_expr`).
 
 ### 5.2 Program and items
 
@@ -420,7 +435,7 @@ item        ::= val_decl | var_decl | fun_decl | type_decl
              |  extension_decl | given_decl | object_decl
 ```
 
-Each `item` begins with a distinct introducing keyword (`val`/`var`/`fun`/`type`/`struct`/`class`/`trait`/`impl`/`extension`/`given`/`object`), so items are self-delimiting with no separator token; the parser ends an item when it sees the next item keyword or the enclosing `}`. `items_block` is reused as the body of `object`, `trait`, `impl`, and `extension`. (Top-level items do **not** include `do`/`return`: executable statements live only inside `fun` bodies and blocks, §5.6.)
+Each `item` begins with a distinct introducing keyword (`val`/`var`/`fun`/`type`/`struct`/`class`/`trait`/`impl`/`extension`/`given`/`object`), so items are self-delimiting with no separator token; the parser ends an item when it sees the next item keyword or the enclosing `}`. `items_block` is reused as the body of `object`, `trait`, `impl`, and `extension`. (Top-level items do **not** include bare expression statements or `return`: executable statements live only inside `fun` bodies and blocks, §5.4. Top-level `fun`/`val` items directly inside a `package` lower to a synthesized `<package>.package$` module, §8.5.)
 
 ### 5.3 Declarations
 
@@ -445,7 +460,8 @@ param_list  ::= "(" sepBy(param, ",") ")"
 param       ::= "using"? LOWER_ID type_ann? ( "=" expr )?
 ```
 
-- `param_list*` realizes both multiple parameter lists (`fun f (a) (b) = …`) **and the nullary form** (`fun neg: Int = …`, zero lists). A nullary `fun` is a 0-ary method/getter: it is always *saturated* and is invoked by selection (`x.neg`, `x /. neg`) — it never eta-expands.
+- `param_list*` realizes both multiple parameter lists (`fun f (a) (b) = …`) **and the nullary form** (`fun neg: Int = …`, zero lists). A nullary `fun` is a 0-ary method/getter: it is always *saturated* and is invoked by selection (`x.neg`, `x .neg`) — it never eta-expands.
+- An **empty parameter list** `()` declares exactly **one parameter of type `Unit`** (the OCaml convention): `fun ping (): Unit = …` is unary and is saturated by applying the Unit literal — `ping ()`. This is distinct from the zero-list nullary getter above; without this rule, `f ()` (application to the bounded argument `()`) could never saturate a "zero-parameter" list.
 - A `using`-marked parameter (or a whole trailing list of them) is a contextual parameter, filled by `given` search (§6.11).
 - `type_param` admits **only** an optional upper bound `<: type`. **There is no variance and no `:` context-bound syntax** (those would conflict with §6.10's invariant, upper-bounds-only model); contextual requirements use explicit `using` parameters.
 
@@ -488,7 +504,7 @@ class_body  ::= "{" items_block "}"
 ```
 
 - `parent` admits a **super-constructor call** `UPPER_ID(...args)`: `class Dog (name: String) <: Animal(name)` invokes `Animal`'s constructor with `name` (§8.2 specifies where the parent-ctor args are supplied). A bare `type` parent (no args) is for traits or for argument-less class parents.
-- **Locked constraints (enforced in typing, not grammar):** a `struct` has no `class_parents` (no inheritance); a `struct` field's declared (unboxed) type must be a primitive or `Ptr` — a managed reference (incl. a box class such as `java.lang.Integer` or `scala.scalanative.unsafe.Ptr`) is a compile error (§6.3). A `class` allows exactly one `parent` (class or trait) plus any number of `with`-listed traits.
+- **Locked constraints (enforced in typing, not grammar):** a `struct` has no `class_parents` (no inheritance); a `struct` field's declared (unboxed) type must be a primitive, `Ptr`, or another all-primitive/`Ptr` struct — a managed reference (incl. a box class such as `java.lang.Integer` or `scala.scalanative.unsafe.Ptr`) is a compile error (§6.3). A `class` allows exactly one `parent` (class or trait) plus any number of `with`-listed traits.
 
 #### Trait, impl, extension, given, object
 
@@ -508,6 +524,8 @@ object_decl   ::= "object" UPPER_ID object_parents? "{" items_block "}"
 object_parents::= "<:" type ("with" type)*
 ```
 
+`given_head` is detected by a bounded scan: if a depth-0 `:` occurs before the first `=` or `{`, the head (optional name, type params, params) is present; otherwise the `given` begins directly with the instance type. An instance **with members** uses the braced form `given T { items }`; `given T = expr` binds an existing value as the instance.
+
 The entry point is an `object_decl` named `Main` whose body declares `fun main (args: Array[String]): Unit = …` (a linker convention, not special grammar). **Object/module-level `var` fields are rejected in MVP** (§2, §6).
 
 ### 5.4 Expressions — control & leaf forms
@@ -519,49 +537,45 @@ assign_expr ::= if_expr
              |  match_expr
              |  throw_expr
              |  try_expr
+             |  while_expr
+             |  for_expr
+             |  return_expr
              |  closure
              |  block
              |  infix_expr ( "=" assign_expr )?       // RHS only when LHS is an assignable var path
 
 if_expr     ::= "if" expr "then" expr "else" expr      // 'else' REQUIRED
+while_expr  ::= "while" expr "do" expr                 // Unit; §7.12
+for_expr    ::= "for" LOWER_ID "in" expr "do" expr     // sugar for e.foreach { x => body }; §7.12
+return_expr ::= "return" expr?                         // early exit from the enclosing fun (§7.13);
+                                                       // the operand, if any, starts on the same line
 
-match_expr  ::= "match" expr "with" match_arms          // ONLY this spelling (no postfix/fluent form)
-match_arms  ::= ( "|" match_arm )+
+match_expr  ::= "match" expr arm_block                  // braces required; no 'with'
+arm_block   ::= "{" ( "|" match_arm )+ "}"              // '{' opens on the same logical line
 match_arm   ::= pattern guard? "=>" expr
-guard       ::= "if" expr
+guard       ::= "if" infix_expr                         // operator-level only: a guard can
+                                                        // never swallow the arm's '=>'
 
 throw_expr  ::= "throw" expr
-try_expr    ::= "try" expr "with" match_arms
+try_expr    ::= "try" expr "catch" arm_block            // 'catch', not 'with' (§7.11)
 
-block       ::= "{" block_body "}"
-block_body  ::= bare_expr                               // (a) single value-token-led expression; its value is the block value
-             |  stmt*                                   // (b) statement sequence; value = trailing value-yielding stmt, else Unit
-stmt        ::= val_decl | var_decl | fun_decl
-             |  do_stmt                                 // do e        — value discarded
-             |  return_stmt                             // return e    — tail value-marker; MUST be last
-             |  kw_expr                                 // if/match/try/throw AS A STATEMENT (no do/return needed)
-do_stmt     ::= "do" expr                               // effectful expr; ≡ val _ = expr
-return_stmt ::= "return" expr                           // tail value-marker: MUST be last; block value (else Unit)
-kw_expr     ::= if_expr | match_expr | try_expr | throw_expr   // keyword-led: self-delimiting (§3.4)
-bare_expr   ::= expr                                    // value-token-led only (no statement keyword at depth 0)
+block       ::= "{" stmts "}"
+stmts       ::= ( stmt ( term stmt )* term? )?
+stmt        ::= val_decl | var_decl | fun_decl | expr   // bare expression statements (§3.4)
 
-closure     ::= "{" closure_params "=>" block_body "}"
+closure     ::= "{" closure_params "=>" stmts "}"
 closure_params ::= sepBy(closure_param, ",")            // may be empty: '{ => e }'
 closure_param  ::= LOWER_ID
                 |  "(" LOWER_ID ":" type ")"
 ```
 
-> **Resolution of prior match-form contradiction.** Only the **prefix** form `match expr with …` exists (a level-12 unbounded leaf). The earlier "postfix/fluent" spelling is **removed** in both grammar and semantics: it conflicted with the level-12 leaf classification and collided with `with`-based struct update and `try … with`.
+> **Arm-block recognition (normative).** A `{` whose first significant token is `|` is an **arm-block**: it is never a bounded argument, a block, or a closure, and it is legal only where `match`/`catch` expect it. This is unambiguous because `|` can begin neither a statement nor a `closure_params` list — `{ |` was dead syntax before this rule. Greedy application therefore stops in front of `{ |`, so `match f x { | A => … }` parses with scrutinee `f x`, while `f x { y => e }` still passes a trailing closure. The arm-block's `{` must open on the **same logical line** as the scrutinee / the `catch` keyword (a line-leading `{` starts a new statement, §3.4 rule 3 — the Go convention). Braces make arm ownership explicit: a nested `match` closes with its own `}`, so the dangling-arm hazard (an outer arm silently captured by an inner match) cannot arise.
 
-> **Judgment call (multi-param closures).** `{ x, y => e }` is a **single** N-parameter (uncurried) closure → one `scala.FunctionN`. The empty form `{ => e }` is a `scala.Function0`. A closure body is a `block_body` (§5.6), so multi-statement closure bodies use statements just like any block: `{ x => do log x; return x + 1 }`.
+> **Judgment call (multi-param closures).** `{ x, y => e }` is a **single** N-parameter (uncurried) closure → one `scala.FunctionN`. The empty form `{ => e }` is a `scala.Function0`. A closure body is a `stmts` sequence like any block: `{ x => log x; x + 1 }` (the last expression is the value).
 
-> **Closure-vs-block disambiguation (bounded lookahead).** On `{`, scan the brace body at depth 0 for `"=>"` *before* any statement-leading keyword (`val`/`var`/`fun`/`do`/`return`/`if`/`match`/`try`/`throw`) and before the matching `}`. If `"=>"` is reached first **and** everything before it matches `closure_params` (a comma-separated list of `LOWER_ID` or `( LOWER_ID : type )`), it is a `closure`; otherwise a `block`. This is bounded (O(params) lookahead) because a real closure's `=>` precedes any statement keyword.
+> **Closure-vs-block disambiguation (bounded lookahead).** On a `{` whose first significant token is **not** `|` (otherwise it is an arm-block, above), scan the brace body at depth 0 for `"=>"` *before* the first `term`, the matching `}`, or any token that cannot occur in `closure_params` (anything other than `LOWER_ID`, `,`, and a parenthesized `LOWER_ID : type` group). If `"=>"` is reached first **and** the prefix matches `closure_params`, it is a `closure`; otherwise a `block`. This is bounded (O(params) lookahead) because a real closure's `=>` precedes the first statement boundary.
 
-> **`block_body` disambiguation.** Decide between the two `block_body` alternatives by the body's first depth-0 token. If it is a **statement-leading keyword** (`val`/`var`/`fun`/`do`/`return` or a keyword-led expression `if`/`match`/`try`/`throw`), parse alternative (b), a `stmt*` sequence. Otherwise (the body opens with a value token), parse alternative (a), a single `bare_expr` whose value is the block value. Within (b):
-> - A **`return_stmt` must be the last statement**; any statement after it is a *"dead code after `return`"* compile error.
-> - A **non-final `kw_expr`** statement has its value discarded (an implicit `do`); a **final `kw_expr`** statement *is* the block's value. (So `{ … if c then a else b }` yields the `if`'s value with no `return`.)
-> - A **non-final, non-`return` value-token-led** computation is illegal as a statement: it must be `do e` (discard) — there is no bare value-led statement, which is what prevents whitespace-application from slurping across a statement boundary. A value-led *result* uses `return e`.
-> - Mixing: a `stmt*` body may end in *either* a `return_stmt` *or* a final `kw_expr` (both supply the value); a body with neither has value `Unit`.
+> **Block value and statement rules.** A block's statements execute in order; statement boundaries are `term`s (§3.4). The block's value is the value of its **final** statement when that statement is an expression; a block whose final statement is a declaration (or an empty block) has value `Unit`. A **non-final** expression statement's value is discarded (a compiler should warn when the discarded type is not `Unit`). Statements after an unconditional `return`/`throw` are an **"unreachable code"** compile error.
 
 > **Assignment.** `infix_expr "=" assign_expr` is the `var` assignment; it is well-typed only when the left side is an assignable mutable path (a local `var` or a `.`-selection of a `var` field). Bare `var`-assignment inside `( )` grouping is forbidden (so `(` followed by `LOWER_ID =` is unambiguously a record/named-tuple, see §5.7).
 
@@ -576,10 +590,10 @@ unary_expr  ::= prefix_op unary_expr                   // level 4
              |  app_expr
 prefix_op   ::= "-" | "+" | "!"
 
-// ONE shared, left-associative application level (whitespace app AND '/.'):
+// ONE shared, left-associative application level (whitespace app AND chain selection):
 app_expr    ::= postfix_expr app_tail*
 app_tail    ::= call_arg                               // apply current callee to one more arg
-             |  "/." LOWER_ID                          // re-thread: accumulated value becomes receiver
+             |  CHAIN_DOT LOWER_ID type_args?          // ' .m' — accumulated value becomes receiver (§4.2)
 
 postfix_expr ::= primary ( "." selector )*             // level 1, '.' tightest; NO paren-call
 selector    ::= LOWER_ID type_args?                    // field / nullary method / method to be applied
@@ -590,8 +604,8 @@ type_args   ::= "[" sepBy1(type, ",") "]"              // explicit type applicat
 
 How `app_tail*` realizes §4.2:
 
-- `postfix_expr` greedily forms `.`-selections first, so `a.f` and `x.g` are formed before any application (`a.f x.g y` ⇒ `(a.f) (x.g) y`).
-- Processing `app_tail*` left-to-right: a `call_arg` applies the current accumulated callee to one more argument; a `"/." LOWER_ID` step makes the accumulated value the receiver and selects the named method, whose following `call_arg` tails become its arguments. Thus `foo bar /. m` and `3 /. add 4 /. times 5 /. neg` are same-level left-associative.
+- `postfix_expr` greedily forms tight-`.` selections first, so `a.f` and `x.g` are formed before any application (`a.f x.g y` ⇒ `(a.f) (x.g) y`).
+- Processing `app_tail*` left-to-right: a `call_arg` applies the current accumulated callee to one more argument; a `CHAIN_DOT LOWER_ID` step makes the accumulated value the receiver and selects the named method, whose following `call_arg` tails become its arguments. Thus `foo bar .m` and `3.add 4 .times 5 .neg` are same-level left-associative.
 - Because application (level 3) binds tighter than `+` (level 6), `f x + y` ⇒ `(f x) + y`.
 
 ```
@@ -599,13 +613,13 @@ call_arg    ::= literal
              |  arg_path                       // LOWER_ID/UPPER_ID with '.' tail; takes no whitespace args
              |  paren_or_tuple
              |  named_tuple_lit
-             |  record_update
+             |  array_lit
              |  construct
              |  closure
              |  block
 ```
 
-`arg_path` is the argument-position restriction of `postfix_expr`: it may take `.`-selectors but may not itself absorb whitespace arguments. **`type_args` is NOT a `call_arg`**: a `[...]` is type application bound to the immediately preceding callee only.
+`arg_path` is the argument-position restriction of `postfix_expr`: it may take tight-`.` selectors but may not itself absorb whitespace arguments. **`type_args` is NOT a `call_arg`**: a **tight** `[` (no preceding whitespace) is type application bound to the immediately preceding callee; a **spaced** `[` begins an `array_lit` argument (§5.6).
 
 ### 5.6 Primary expressions and literals
 
@@ -614,7 +628,7 @@ primary     ::= literal
              |  UNIT_LIT                        // ()
              |  paren_or_tuple
              |  named_tuple_lit
-             |  record_update
+             |  array_lit
              |  construct
              |  path
 
@@ -625,28 +639,38 @@ path        ::= ( LOWER_ID | UPPER_ID ) ( "." LOWER_ID | "." UPPER_ID )* type_ar
 paren_or_tuple ::= "(" expr ( "," expr )+ ")"   // tuple, arity >= 2
                 |  "(" expr ")"                  // grouping, arity 1
 
-named_tuple_lit ::= "(" named_arg ( "," named_arg )+ ")"   // arity >= 2
-                 |  "(" named_arg "," ")"                  // ONE-field; trailing comma REQUIRED
+named_tuple_lit ::= "(" named_arg ( "," named_arg )* ","? ")"   // arity >= 1; (x = 1) is one-field
 named_arg   ::= LOWER_ID "=" expr
+
+array_lit   ::= "[" sepBy(expr, ",") "]"           // spaced '[' in value position (§3.1, §4.3)
 
 construct   ::= UPPER_ID type_args? "(" sepBy(ctor_arg, ",") ")"   // 'Point(x=1, y=2)' or 'Box(42)'
 ctor_arg    ::= named_arg | expr                                   // named or positional
 
-record_update ::= "(" ".." expr ( "," named_arg )+ ")"             // '(..base, field = v)'
-struct_update ::= postfix_expr "with" "(" sepBy1(named_arg, ",") ")"  // 'base with (field = v)'
+update_expr ::= postfix_expr "with" "(" sepBy1(named_arg, ",") ")"   // 'base with (field = v)'
+                                                                      // ONE form: records, structs, classes
 ```
 
-`struct_update` attaches at the postfix level inside the larger expression machinery; the parser admits `base with (…)` wherever a `postfix_expr` is followed by the `with` keyword and a `( named_arg, … )` group. The leading `..` of `record_update` is a distinct token from `.` selection.
+`update_expr` attaches at the postfix level inside the larger expression machinery; the parser admits `base with (…)` wherever a `postfix_expr` is followed by the `with` keyword and a `( named_arg, … )` group — and since `match` arms moved into arm-blocks, an expression-position `with` is **always** an update. (The v0.1 spread form `(..base, …)` and its `..` token are removed; `with` is the single update spelling for records, structs, and classes alike.)
+
+**Bracket classification (normative, token-level).** In expression context, every `[` and `(` is classified by **one token of lookbehind plus the intervening-whitespace flag** — no parser feedback, no semantic information:
+
+| `[`/`(` glued tightly after… | `[` means | `(` means |
+|---|---|---|
+| `UPPER_ID` (path/selector tail, or its closing type-args `]`) | type arguments | **construction** `T(...)` |
+| `LOWER_ID` (path/selector/callee tail) | type arguments (`map[Int]`) | **parse error** — *"Hi has no paren-calls: write `f x`, `f (e)`, or `f ()`"* |
+| `)` `]` or a literal | **parse error** — looks like indexing/a call; insert a space | **parse error** — insert a space |
+| anything else (`=` `,` `(` `[` operators, keywords, statement start) — or **any** whitespace | **array literal** | grouping / tuple / record (§5.7) |
+
+Consequences: `val a=[1, 2, 3]` is an array literal (the `[` follows `=`); `map[Int] xs` type-applies; tight `xs[0]` is a type-argument parse that fails (`0` is not a type) — indexing sugar is reserved (§2.2), use `xs.get i` / `xs.set i v` / `xs.length` (§6.2); `Point(x = 1)` constructs while `Point (x = 1)` applies the value `Point` to a one-field record (typically a type error); and `f(x, y)` is a **parse error** rather than silently passing one *tuple* argument — write `f x y`. In *type* context every `[` is a type-argument block (types have no array literals); in *pattern* context `Some(x)` and `Some (x)` are equivalent (patterns have no application, so the classification does not apply).
+
+An empty literal `[]` requires an expected type `Array[T]` (check mode); in synthesis position it is a compile error. A non-empty `array_lit` synthesizes `Array[T]` where every element checks against one element type `T`; in check mode against `Array[Object]`, primitive elements box (§6.8).
 
 ### 5.7 Disambiguating the leading `(`
 
-`record_update`, `named_tuple_lit`, `paren_or_tuple`, and (in type context) the type forms all start with `(`. Resolution is **operational and bounded**:
+`named_tuple_lit`, `paren_or_tuple`, and (in type context) the type forms all start with `(`. Resolution is **operational and bounded**:
 
-- First token after `(` is `..` → `record_update`.
-- First two tokens are `LOWER_ID "="` → commit to **named-tuple / record-literal** parsing of a `named_arg`. Then:
-  - more `,`-separated `named_arg`s → arity-≥2 named tuple;
-  - exactly one `named_arg` followed by `,` then `)` → one-field named tuple;
-  - exactly one `named_arg` immediately followed by `)` (no trailing comma) → **parse error**: *"one-field named tuple requires a trailing comma: write `(x = 1,)`"*. (`(x = 1)` is never a silently-typed assignment because bare `var`-assignment is forbidden inside `( )` grouping, §5.4.)
+- First two tokens are `LOWER_ID "="` → commit to **named-tuple / record-literal** parsing: one or more `,`-separated `named_arg`s, trailing comma permitted. `(x = 1)` is the one-field record literal — it is never a silently-typed assignment because bare `var`-assignment is forbidden inside `( )` grouping (§5.4).
 - Otherwise → `paren_or_tuple`.
 
 ### 5.8 Patterns
@@ -666,8 +690,7 @@ typed_pat      ::= pattern_no_alt ":" type                  // type test: 'x: Ca
 ctor_pat       ::= UPPER_ID ( "(" sepBy(pattern_field, ",") ")" )?
 pattern_field  ::= ( LOWER_ID "=" )? pattern                // positional OR named, uniformly
 
-named_tuple_pat::= "(" named_pat ( "," named_pat )+ ")"     // structural record, arity >= 2
-                |  "(" named_pat "," ")"                     // one-field, trailing comma required
+named_tuple_pat::= "(" named_pat ( "," named_pat )* ","? ")" // structural record, arity >= 1
 named_pat      ::= LOWER_ID "=" pattern
 tuple_pat      ::= "(" pattern ( "," pattern )+ ")"          // positional tuple, arity >= 2
 ```
@@ -694,14 +717,13 @@ atom_type       ::= type_path | tuple_type | named_tuple_type | "(" type ")"
 type_path       ::= UPPER_ID ( "." UPPER_ID )*                // qualified type name
                  |  LOWER_ID                                  // type variable in scope
 tuple_type      ::= "(" type ( "," type )+ ")"                // arity >= 2
-named_tuple_type::= "(" named_field_t ( "," named_field_t )+ ")"  // arity >= 2
-                 |  "(" named_field_t "," ")"                     // one-field, trailing comma REQUIRED
+named_tuple_type::= "(" named_field_t ( "," named_field_t )* ","? ")"  // arity >= 1; (x: Int) is one-field
 named_field_t   ::= LOWER_ID ":" type
 ```
 
 **Type-level disambiguation (normative).** The four `(`-leading type forms are resolved by parsing the parenthesized group and then looking at what follows the matching `)` (this is **not** LL(1); the parser uses a backtracking gate / Pratt lookahead to the matching close `+1`):
 
-- First two tokens are `LOWER_ID ":"` → `named_tuple_type`. A **one-field** named tuple type **requires** the trailing comma: `(x: Int,)`. A bare `(x: Int)` (no comma) is a **parse error** (same one-field rule as literals). **Arrow domains are unlabeled** (`param_types` holds bare types), so `(x: Int)` is never an arrow domain.
+- First two tokens are `LOWER_ID ":"` → `named_tuple_type` (arity ≥ 1; `(x: Int)` is the one-field record type, trailing comma permitted). **Arrow domains are unlabeled** (`param_types` holds bare types), so a labeled group is never an arrow domain.
 - After the matching `)`, if `->` follows → the parenthesized contents are an **arrow domain** (`param_types`), e.g. `(A, B) -> C`, and the single-type case `(A) -> B` is a one-argument arrow distinct from grouping `(A)`.
 - Multiple comma-separated bare types not followed by `->` → `tuple_type`.
 - A single bare type not followed by `->` → grouping.
@@ -710,21 +732,24 @@ Right-associativity of `->` and the layering union-looser-than-intersection-loos
 
 ### 5.10 Worked parse checks (normative)
 
-1. **`.` tighter than application:** `a.f x.g y` ⇒ `(a.f) (x.g) y`.
-2. **`/.` at application precedence, left-assoc:** `3 /. add 4 /. times 5 /. neg` ⇒ call structure `((3.add 4).times 5).neg` (= −35), and `foo bar /. m` ⇒ `((foo bar) /. m)`.
+1. **Tight `.` tighter than application:** `a.f x.g y` ⇒ `(a.f) (x.g) y`.
+2. **Chain selection at application precedence, left-assoc:** `3.add 4 .times 5 .neg` ⇒ call structure `((3.add 4).times 5).neg` (= −35), and `foo bar .m` ⇒ chain on `(foo bar)`.
 3. **Application tighter than `+`:** `f x + y` ⇒ `(f x) + y`.
 4. **Unbounded arg must be parenthesized:** `f (if c then a else b)` parses; `f if c then a else b` does not.
-5. **One-field named tuple:** `(x = 1,)` is a named tuple; `(x = 1)` is a parse error (trailing comma required).
+5. **One-field named tuple:** `(x = 1)` is a one-field record literal (assignment is forbidden inside `( )` grouping); `(x = 1,)` is the same with a permitted trailing comma.
 6. **Closure vs block:** `{ x => x + 1 }` is a closure; `{ val a = 1; a }` is a block; `{ => e }` is a `Function0` closure.
-7. **Record update vs selection:** `(..base, x = 2)` is `record_update`; `base.x` is selection.
-8. **Type application is a suffix, not an argument:** `map[Int] xs` type-applies `map` then applies it to `xs`; `[Int]` is never a standalone argument.
+7. **Update vs selection:** `base with (x = 2)` is functional update (records, structs, and classes alike); `base.x` is selection.
+8. **Bracket classification:** `map[Int] xs` type-applies `map` then applies it to `xs`; `map [1, 2]` applies `map` to the array literal `[1, 2]`; `val a=[1, 2, 3]` is an array literal (the `[` follows `=`, not an identifier); `f(x, y)` is a parse error (*no paren-calls* — write `f x y`), never a one-tuple application.
+9. **Newline termination:** `f x ⏎ (y)` is two statements (a `(`-led line never continues an application); `xs.filter p ⏎ .map f` is one chain (leading-`.` continuation, §3.4).
+10. **Spacing around `.`:** `x.m` is tight selection on `x`; `x .m` is chain selection on the accumulated value to its left.
+11. **Arm-block vs trailing closure:** `match f x { | A => 1 | B => 2 }` — application stops before `{ |`, so the scrutinee is `f x`; `f x { y => e }` still passes a trailing closure.
 
 ### 5.11 Out of MVP scope (not in this grammar)
 
 - User-defined effect handlers (only `throw`, `try … with`).
 - Row-polymorphic / generic record update (no syntax).
 - Value-backed enums; value structs holding managed references.
-- `while`/`for` loops and `return`; user symbolic operators; list literals / indexing `xs[i]`.
+- `break`/`continue`; non-local `return` from closures; user symbolic operators; tight indexing sugar `xs[i]`.
 - Variance annotations and `:`-context-bounds on type parameters (use `using`).
 
 ---
@@ -738,7 +763,7 @@ Everything here is checked at compile time; Hi arrives at the backend **fully ty
 Hi does **not** use Hindley–Milner. There is no global unification, no let-generalization, and no principal-type guarantee. Inference is Scala-3-style *local* and *bidirectional*; subtyping is discharged by **subsumption**.
 
 - **Check mode** `Γ ⊢ e ⇐ T`: an expected type `T` is pushed into `e`. Used for: function arguments, the body of an annotated binding/function, both `if` branches, all `match`/`try` arms, annotated returns.
-- **Synthesis mode** `Γ ⊢ e ⇒ S`: `S` is computed from `e` alone. Used for: a `match` scrutinee, the receiver of `.`/`/.`, the RHS of an un-annotated `val`/`var`, the head of an application.
+- **Synthesis mode** `Γ ⊢ e ⇒ S`: `S` is computed from `e` alone. Used for: a `match` scrutinee, the receiver of a (tight or chain) selection, the RHS of an un-annotated `val`/`var`, the head of an application.
 
 The modes meet at subsumption: in check mode, synthesize `S`, then require `S <: T`.
 
@@ -753,7 +778,7 @@ The modes meet at subsumption: in check mode, synthesize `S`, then require `S <:
 | `trait` member signatures | **Required** | Interface contract. |
 | `type` alias / ADT constructor argument types | **Required** | Define the nominal shape. |
 | Local `val` / `var` | **Inferred** from RHS (synthesis), unless annotated. |
-| Closure parameters | **Inferred** from the expected function type in check mode; **required** otherwise. Bare `{ x => e }` in synthesis position is an error. |
+| Closure parameters | **Inferred** from the expected function type — or SAM-interface signature (§7.6) — in check mode; **required** otherwise. Bare `{ x => e }` in synthesis position is an error. |
 | `using` parameters | **Required** type; the *value* is found by search. |
 | Generic type arguments | **Inferred** at call sites where possible; may be supplied explicitly (`f[Int] x`). |
 
@@ -787,7 +812,7 @@ The modes meet at subsumption: in check mode, synthesize `S`, then require `S <:
 
 - **No implicit numeric widening** (`Int → Long`, etc.); conversions are explicit methods (`n.toLong`). *Judgment call*: kept minimal to avoid coercion complexity local inference handles poorly.
 - **Boxing**: a primitive used where a reference type is expected (stored in `Array[Object]`, a union, or a generic at a reference type) is boxed to its canonical box class (`java.lang.Integer`, …) per the NIR box/unbox tables; inserted by the elaborator.
-- `String` is the reference type `java.lang.String` (4 fields `value, offset, count, cachedHashCode`). `Array[T]` is `Type.Array(elemTy)`.
+- `String` is the reference type `java.lang.String` (4 fields `value, offset, count, cachedHashCode`). `Array[T]` is `Type.Array(elemTy)`; arrays are built with literals `[e1, …, en]` (§5.6) or runtime allocation, and accessed with the built-in members `xs.get i`, `xs.set i v`, `xs.length` (lowering to `Op.Arrayload`/`Op.Arraystore`/`Op.Arraylength`, §8.9). Indexing sugar `xs[i]` is reserved (§2.2).
 - **`Null` and nullability (surface decision).** MVP reference types are **nullable** (mirroring the backend `Type.Ref.nullable`). `null` arises only from interop/runtime, has type `Null <: R` for every reference type `R`, and dereferencing it throws `NullPointerException` (§7).
 
 ### 6.3 Struct (value) vs. Class (reference)
@@ -803,6 +828,8 @@ struct Vec2 (x: Double, y: Double)
 - **MVP GC-safety restriction (load-bearing).** A `struct` field's declared (unboxed) static type may be **only** a primitive, `Ptr`, or another all-primitive/`Ptr` struct. A managed reference — `class`, `String`, `Array`, ADT, structural record, trait, union/intersection, **or a box class** (e.g. `java.lang.Integer`, `scala.scalanative.unsafe.Ptr`) — is a **compile error** at the declaration site.
 
   *Why (verified backend behavior).* The Immix/Commix GC scans heap-object fields precisely using the RTTI reference-offset bitmap. As implemented in `MemoryLayout.referenceFieldsOffsets`, that bitmap records offsets of **top-level `RefKind` fields** plus exactly one synthetic shape — `StructValue(RefKind :: ArrayValue(Byte, n) :: Nil)`, a single ref + alignment padding emitted by `ofAlignedFields`. It does **not** descend into a general multi-field `StructValue` to record interior reference offsets. A managed reference buried in a by-value struct field of a heap object would therefore be invisible to the precise scan and could be collected prematurely. (The stack is scanned conservatively, so *stack-only* value structs with refs would be safe but require per-shape RTTI — deferred.) Anything that must hold a managed reference must be a `class`.
+
+  *Lift path (post-MVP, contained).* The markers (immix/commix `Marker.c`) walk an arbitrary `-1`-terminated offset array from RTTI, so this restriction can be removed without touching GC C code: make `referenceFieldsOffsets` recurse into nested `StructValue` fields and emit `outer + inner` offsets for interior references. Alternatively the frontend can flatten ref-carrying structs into their enclosing class/record (SROA — semantics-preserving because structs have no identity or interior pointers). `Array[struct-with-refs]` remains deferred either way (typed-array classes carry no per-element ref maps).
 
 - **Construction:** `Vec2(x = 1.0, y = 2.0)`. **Functional update:** `base with (x = 3.0)` (§6.6).
 
@@ -832,7 +859,7 @@ Subsumption is the only consumer of `<:`.
 
 ### 6.4 Structural records
 
-Type `(x: Int, y: Int)`; literal `(x = 1, y = 2)`; one-field literal/type need a trailing comma `(x = 1,)` / `(x: Int,)`.
+Type `(x: Int, y: Int)`; literal `(x = 1, y = 2)`; one-field forms `(x = 1)` / `(x: Int)` (trailing comma permitted, §5.7).
 
 - **Identity** = set of `(field-name, field-type)` pairs, order-independent. **No width subtyping, no row polymorphism:** `(x: Int, y: Int)` is *not* a subtype of `(x: Int)`.
 - **NIR lowering:** records are **reference types** (they may hold managed refs and so are heap-backed). Each distinct canonical shape lowers to a deterministically-named heap **class** with fields sorted by name (§8.6), giving it a precise GC bitmap.
@@ -845,11 +872,11 @@ Type `(x: Int, y: Int)`; literal `(x = 1, y = 2)`; one-field literal/type need a
 (A, B, C) as a type  ≡   (_1: A, _2: B, _3: C)
 ```
 
-Tuples are structural records with synthesized names `_1.._n`; all record rules apply. Element access is field access (`t._1`). `()` is the `Unit` value. A one-element tuple is not a distinct type (`(a)` is grouping); a one-field *named* record needs the trailing comma.
+Tuples are structural records with synthesized names `_1.._n`; all record rules apply. Element access is field access (`t._1`). `()` is the `Unit` value. A one-element tuple is not a distinct type (`(a)` is grouping); the one-field *named* record `(x = a)` is the arity-1 form.
 
 ### 6.6 Type-directed functional update
 
-Sugar resolved at compile time, rebuilding a record/struct/class from a base plus overrides. Forms: structural record `(..base, field = v, …)`; struct/class `base with (field = v, …)`.
+Sugar resolved at compile time, rebuilding a record/struct/class from a base plus overrides. One form for all three: `base with (field = v, …)`.
 
 **Typing rule (base's full static type must be known):**
 
@@ -858,7 +885,7 @@ Sugar resolved at compile time, rebuilding a record/struct/class from a base plu
 overrides = { g1 = v1, …, gk = vk }     { g1,…,gk } ⊆ { f1,…,fn }
 for each gi:  Γ ⊢ vi ⇐ type-of(gi in R)
 ──────────────────────────────────────────────────────────────  (update)
-Γ ⊢ ( ..base, g1 = v1, … )  ⇒  R           // likewise for  base with (…)
+Γ ⊢ base with (g1 = v1, …)  ⇒  R
 ```
 
 - Result type is exactly `R`; adding a field not in `R` is an error.
@@ -944,12 +971,12 @@ impl Show[Int] for Int { fun show (self: Int): String = ... }
 extension (n: Int) { fun double (): Int = n + n }
 ```
 
-Extension methods add `.method` / `/.method` syntax without modifying the type. They are **statically resolved** from the receiver's static type and in-scope extensions; no vtable/itable entry, no dynamic dispatch. `x.double` compiles to a direct static call. This is why D4's `/.` chain steps and D3's `a.f` selections remain methods/extensions keyed on the receiver's *type*. Checked: exactly one extension applies; ambiguity is an error.
+Extension methods add `.method` / ` .method` (chain) syntax without modifying the type. They are **statically resolved** from the receiver's static type and in-scope extensions; no vtable/itable entry, no dynamic dispatch. `x.double` compiles to a direct static call. This is why §4.2's chain steps and `a.f` selections remain methods/extensions keyed on the receiver's *type*. Checked: exactly one extension applies; ambiguity is an error.
 
 #### `given` / `using` — dictionary passing
 
 ```hi
-given Show[Int] = { ... }
+given Show[Int] { fun show (self: Int): String = ... }   // instance with members: braced form
 fun render[A] (x: A) (using s: Show[A]): String = s.show x
 render 42                              // s found by given search
 ```
@@ -960,7 +987,7 @@ render 42                              // s found by given search
 
 - All expressions typed in check/synthesis mode; subsumption uses `<:`.
 - Top-level/public `fun`s, fields, trait members, ctor arg types are annotated; `self` is exempt.
-- `struct` fields are primitives/`Ptr` only (checked on the declared, unboxed type).
+- `struct` fields are primitives/`Ptr`/nested all-primitive structs only (checked on the declared, unboxed type).
 - Structural-record identity, field presence on `.`, type-preserving update over a fully-known base.
 - ADT `match` exhaustiveness and non-redundancy (errors).
 - `|`/`&` restricted to reference types; intersection field-collision is an error; joins resolved by checked `<:`/`lub`.
@@ -971,7 +998,7 @@ render 42                              // s found by given search
 
 ## 7. Expressions, Statements & Semantics
 
-Hi is **expression-oriented**: every construct produces a value (possibly `Unit`). The statement forms are `val`/`var` bindings, nested `fun` declarations, `do e` (a value-token-led effectful expression, value discarded; `do e` ≡ `val _ = e`), a trailing `return e` (the tail value-marker), and a **keyword-led expression** (`if`/`match`/`try`/`throw`) standing as a statement directly (§3.4) — discarded if non-final, the block value if final. Evaluation is **call-by-value** and **strictly left-to-right** unless a construct short-circuits (`if`, `match`, `&&`/`||`). The backend's NIR is a strict, ordered SSA form; Hi performs no reordering of effectful subexpressions.
+Hi is **expression-oriented**: every construct produces a value (possibly `Unit`). The statement forms are `val`/`var` bindings, nested `fun` declarations, and **bare expression statements** — any expression may stand as a newline-terminated statement (§3.4); a non-final statement's value is discarded, and a block's final expression statement supplies its value. `return` exits the enclosing `fun` early (§7.13); `while`/`for` are the loop forms (§7.12). Evaluation is **call-by-value** and **strictly left-to-right** unless a construct short-circuits (`if`, `match`, `&&`/`||`). The backend's NIR is a strict, ordered SSA form; Hi performs no reordering of effectful subexpressions.
 
 ### 7.1 Evaluation model
 
@@ -990,7 +1017,7 @@ Immutability is *binding-level*, not deep: a `val` to a mutable `class` still pe
 ```hi
 val n = 10
 var acc = 0
-do acc = acc + n        // assignment is value-token-led (`acc = …`), so it is a `do` statement
+acc = acc + n           // assignment is an ordinary expression statement (type Unit)
 val (x, y) = (1, 2)     // irrefutable tuple pattern
 ```
 
@@ -998,13 +1025,13 @@ Local annotations are optional (inference); an annotation, if present, is the ex
 
 ### 7.3 Blocks and sequencing
 
-A block executes each statement in order (`do e` statements and non-final keyword-led expressions evaluated for effects, value discarded); its value is supplied by either a trailing `return e` **or** a final keyword-led expression (`if`/`match`/`try`/`throw`), else `Unit`. A single value-token-led expression body (`{ e }`, alternative (a) of §5.6) has value `e`. Names from `val`/`var`/`fun` are scoped to the block remainder and shadow outer names lexically. Statement order is purely textual; because whitespace and newlines are insignificant (§3.1), the same statements separated by spaces, newlines, or an optional `;` parse identically — boundaries come from the statement-leading keywords (§3.4), not from layout.
+A block executes each statement in order; non-final expression statements are evaluated for effect, their values discarded (a compiler should warn when the discarded type is not `Unit`). The block's value is its **final expression statement's** value, else `Unit`. Names from `val`/`var`/`fun` are scoped to the block remainder and shadow outer names lexically. Statement boundaries are significant newlines or `;` (§3.4); indentation carries no meaning.
 
 ```hi
 val r = {
   val a = compute ()
-  do  log a              // effectful statement (value discarded)
-  return a * 2           // block value (tail value-marker)
+  log a                  // effectful statement (value discarded)
+  a * 2                  // final expression = the block's value
 }
 ```
 
@@ -1018,7 +1045,7 @@ val sign = if n < 0 then -1 else if n > 0 then 1 else 0
 
 ### 7.5 `match`
 
-Canonical (and only) form: `match e with | pat => e2 | …`. The scrutinee evaluates once, left-to-right before any arm. Arms are tried top to bottom; the first whose pattern matches (and whose optional guard, evaluated only after a structural match, is `true`) is selected. The result type is the LUB of all arm bodies (subject to the §7.4 join rules).
+Canonical (and only) form: `match e { | pat => e2 | … }` — a braced **arm-block** (§5.4); the `{` opens on the same logical line as the scrutinee. The scrutinee evaluates once, left-to-right before any arm. Arms are tried top to bottom; the first whose pattern matches (and whose optional guard, evaluated only after a structural match, is `true`) is selected. The result type is the LUB of all arm bodies (subject to the §7.4 join rules).
 
 | Pattern | Matches | Binds |
 |---|---|---|
@@ -1038,9 +1065,10 @@ A bare lowercase identifier is always a **binder**. A name may not be bound twic
 type Shape = | Circle of Double | Rect of (w: Double, h: Double)
 
 fun area (s: Shape): Double =
-  match s with
+  match s {
   | Circle r            => 3.14159 * r * r
   | Rect (w = w, h = h) => w * h
+  }
 ```
 
 ### 7.6 Closures
@@ -1057,6 +1085,12 @@ val pred = { (x: Int) => x > 0 }
 
 Argument count must match arity; supplying fewer arguments to a closure value is a type error (closure values are not auto-curried). Partial application is a property of named `fun`s (§7.7).
 
+**SAM conversion (in MVP).** In check mode against a **trait/interface type with exactly one abstract method** — including javalib functional interfaces such as `java.lang.Runnable` or `java.util.Comparator` — a closure synthesizes an anonymous class implementing that interface: the closure's parameters and body check against the SAM's signature, and the lowering (§8.1) is identical to the `FunctionN` case except that the synthesized class implements the target interface. In synthesis position a closure still yields a `scala.FunctionN`. `return` inside the body remains illegal (§7.13).
+
+```hi
+val task: Runnable = { => doWork () }     // closure checked against a SAM interface
+```
+
 ### 7.7 Whitespace application; currying & eta-expansion
 
 Application is juxtaposition: `f x y`. Only **bounded** arguments may appear unparenthesized (§4.3); unbounded args must be parenthesized. `f x + y` ≡ `(f x) + y`; `f x.g` ≡ `f (x.g)` (`.` is tighter). Evaluation order: callee, then args left-to-right, then call.
@@ -1065,7 +1099,7 @@ Application is juxtaposition: `f x y`. Only **bounded** arguments may appear unp
 
 - A **saturated** call lowers to a single flat NIR method call (`Op.Call`, all args one list). No intermediate closures.
 - An **under-applied** call — fewer lists than declared, including the bare selection `recv.m` (for a **non-nullary** `m`) — **eta-expands** to a closure (a `scala.FunctionN`) capturing supplied args/receiver, whose later application invokes the underlying flat method.
-- A **nullary** method/getter (zero remaining lists) is always saturated and invoked by selection (`x.neg`, `x /. neg`); it never eta-expands and has no `()` spelling.
+- A **nullary** method/getter (zero remaining lists) is always saturated and invoked by selection (`x.neg`, `x .neg`); it never eta-expands and has no `()` spelling.
 
 ```hi
 fun add (a: Int) (b: Int): Int = a + b
@@ -1074,12 +1108,12 @@ val inc = add 1          // under-applied -> closure (Int -> Int)
 val v   = inc 41         // 42
 ```
 
-### 7.8 `/.` method-chain operator
+### 7.8 Chain selection ` .m`
 
-`/.` is the fluent method-chain operator at **application precedence**, **left-associative**, sharing one level with whitespace application (§4.2). In `lhs /. m a b`, the fully-evaluated `lhs` becomes the **receiver** of method/extension `m`, then trailing bounded args apply. `m`/`add`/`times`/`neg` resolve as methods/extensions on the receiver's type, never free functions. Evaluation: leftmost `lhs` first; each `/. m args` evaluates args left-to-right and dispatches; the result becomes the next receiver.
+Chain selection — a whitespace-preceded `.` — is the fluent method-chain form at **application precedence**, **left-associative**, sharing one level with whitespace application (§4.2). In `lhs .m a b`, the fully-evaluated `lhs` becomes the **receiver** of method/extension `m`, then trailing bounded args apply; `m` resolves on the receiver's type, never as a free function. Evaluation: leftmost `lhs` first; each ` .m args` step evaluates args left-to-right and dispatches; the result becomes the next receiver. A leading `.` on a new line continues the chain (§3.4 rule 3).
 
 ```
-3 /. add 4 /. times 5 /. neg   ≡ call structure ((3.add 4).times 5).neg = -35
+3.add 4 .times 5 .neg   ≡ call structure ((3.add 4).times 5).neg = -35
 ```
 
 Each step lowers to an `Op.Method` dispatch (class method) or a direct static `Op.Call` (extension), followed by argument application.
@@ -1096,18 +1130,20 @@ A field/method access on `null` throws `NullPointerException`.
 
 ### 7.10 Construction and functional update
 
-**Construction.** Nominal `struct`/`class`/variant: `T(field = v, …)` or positional `T(e, …)`; structural records: `(field = v, …)` (one-field `(field = v,)`). All fields must be supplied (no partial records). Initializers evaluate left-to-right, then allocation: value struct → unboxed aggregate (`Op.Insert`); class → `Op.Classalloc` + field stores; structural record → deterministic canonical heap class.
+**Construction.** Nominal `struct`/`class`/variant: `T(field = v, …)` or positional `T(e, …)`; structural records: `(field = v, …)` (one-field `(field = v)`). All fields must be supplied (no partial records). Initializers evaluate left-to-right, then allocation: value struct → unboxed aggregate (`Op.Insert`); class → `Op.Classalloc` + field stores; structural record → deterministic canonical heap class.
 
-**Functional update** (type-directed sugar over a base of known static type): structural `(..base, field = v, …)`; struct/class `base with (field = v, …)`. Both **desugar to a full rebuild**: evaluate `base` once, then construct a fresh value of `base`'s static type, copying every unchanged field and applying overrides (last-wins). The static type is exactly `base`'s; no fields added/removed. **No row polymorphism**, so a generic "update any record" function is not expressible. Update is **distinct from `&`** (last-wins override vs. field-set merge with collision forbidden). The base is not mutated (value semantics for structs; a fresh object for records/classes).
+**Functional update** (type-directed sugar over a base of known static type): `base with (field = v, …)` — one form for records, structs, and classes. It **desugars to a full rebuild**: evaluate `base` once, then construct a fresh value of `base`'s static type, copying every unchanged field and applying overrides (last-wins). The static type is exactly `base`'s; no fields added/removed. **No row polymorphism**, so a generic "update any record" function is not expressible. Update is **distinct from `&`** (last-wins override vs. field-set merge with collision forbidden). The base is not mutated (value semantics for structs; a fresh object for records/classes).
 
 ```hi
 val p2 = p with (y = 9)            // Point(x = 1, y = 9)
-val r2 = (..r, x = 10, z = 30)     // (x = 10, y = 2, z = 30)
+val r2 = r with (x = 10, z = 30)   // (x = 10, y = 2, z = 30)
 ```
 
-### 7.11 Exceptions: `throw e` and `try e with | P => h`
+### 7.11 Exceptions: `throw e` and `try e catch { | P => h }`
 
 The MVP has no algebraic effects; error handling is exceptions only.
+
+> **Judgment call (`catch` + braced arm-block).** v0.1 spelled the handler `try e with | …`; v0.2 uses **`catch`** followed by a braced arm-block (§5.4), like `match`. Besides familiarity (Scala/Java), this removes a real parse collision — `try base with (x = 1) …` needs no lookahead to distinguish a handler from a postfix update — and the braces make handler ownership explicit when `try`s nest inside `match` arms (and vice versa). `with` is reserved for functional update and parent lists.
 
 **`throw e`.** `e` must statically be `<: Throwable`. `throw e` raises the value, unwinding to the nearest dynamically-enclosing handler. As an expression it has type `Nothing` (assignable anywhere). Construction uses `T(...)` (no `new`): `throw IllegalArgumentException("negative")`. Lowering: `Inst.Throw(value, unwind)`.
 
@@ -1116,32 +1152,82 @@ fun checked (n: Int): Int =
   if n >= 0 then n else throw IllegalArgumentException("negative")
 ```
 
-**`try e with | P => h`.** Evaluate `e`. On normal completion its value is the result. If `e` throws `v <: Throwable`, handler clauses are tried top to bottom; each `| P => h` matches `v` (typically a typed pattern `ex : SomeException`, but any `match` pattern form is allowed). The first match binds and evaluates `h`; its value is the result. If none match, `v` re-propagates. The result type is the LUB of `e` and all handler bodies (subject to §7.4 join rules). **No `finally` in the MVP.** A clause pattern whose type is not `<: Throwable` is a compile error.
+**`try e catch { | P => h … }`.** Evaluate `e`. On normal completion its value is the result. If `e` throws `v <: Throwable`, handler clauses are tried top to bottom; each `| P => h` matches `v` (typically a typed pattern `ex : SomeException`, but any `match` pattern form is allowed). The first match binds and evaluates `h`; its value is the result. If none match, `v` re-propagates. The result type is the LUB of `e` and all handler bodies (subject to §7.4 join rules). **No `finally` in the MVP.** A clause pattern whose type is not `<: Throwable` is a compile error.
 
 ```hi
 val v =
   try parse input
-  with
+  catch {
   | _ : NumberFormatException => 0
-  | e : RuntimeException      => { log e ; -1 }
+  | e : RuntimeException      => { log e; -1 }
+  }
 ```
 
 Lowering uses NIR landing pads (`Next.Unwind`), dispatching the caught value through the clause patterns exactly as a `match` (type/structural tests via `Op.Is`/`Op.As`), re-throwing if no clause matches. Reuses the existing exception machinery.
 
-### 7.12 Evaluation-order summary (normative)
+### 7.12 Loops: `while` and `for`
+
+- **`while c do e`** evaluates `c : Bool`; while it is `true`, evaluates `e` (value discarded) and re-tests. Result type `Unit`. Lowering: a header block testing `c` (`Inst.If`) and a body block ending in a back-edge `Inst.Jump` to the header; mutable locals are `Op.Var` slots (§8.1), so no phi-threading is required.
+- **`for x in e do body`** is **pure sugar**, desugared before typing to `e.foreach { x => body }`. It therefore works for any receiver whose type has a `foreach` method or extension of type `(T -> Unit) -> Unit` — no collections library required. Result type `Unit`. Multiple generators, guards, pattern binders, and `for … yield` are deferred to the collections milestone (§2.2).
+- **`break`/`continue` do not exist** in the MVP (keywords reserved, §3.5); exit early with `return`, a flag `var`, or restructuring.
+- **No tail-call guarantee.** Hi does not guarantee tail-call elimination (Interflow may inline or optimize, but it is not a language guarantee). Use `while`/`for` for unbounded iteration; recursion is for naturally tree-shaped or bounded-depth structure.
+
+```hi
+fun sumTo (n: Int): Int = {
+  var i = 0
+  var acc = 0
+  while i <= n do {
+    acc = acc + i
+    i = i + 1
+  }
+  acc
+}
+```
+
+### 7.13 `return` — early exit from the enclosing function
+
+`return e` (or bare `return`, which returns `()`) immediately exits the **innermost enclosing `fun`** with value `e`, checked against that function's declared or inferred result type. As an expression, `return e` has type `Nothing`, so it composes in branches: `if n < 0 then return -1 else n` checks at type `Int`.
+
+- `return` exits a *function*, never just a block; a block's value is its final expression (§7.3), so tail-position `return` is legal but redundant.
+- **Closure boundary:** a `return` inside a closure body is a compile error in the MVP (non-local return is deferred, §2.2). Closures yield their body value.
+- Statements after an unconditional `return` are an "unreachable code" compile error (§5.4).
+- Lowering: `Inst.Ret(v)` at the point of occurrence — NIR functions may carry multiple return blocks — with no unwinding interaction (`try` has no `finally` in the MVP).
+
+```hi
+fun indexOf (xs: Array[Int]) (x: Int): Int = {
+  var i = 0
+  while i < xs.length do {
+    if xs.get i == x then return i else ()
+    i = i + 1
+  }
+  -1
+}
+```
+
+### 7.14 Evaluation-order summary (normative)
 
 | Construct | Order |
 |---|---|
-| Block | statements top-to-bottom; value from trailing `return` or final keyword-led expr, else `Unit` |
+| Block | statements top-to-bottom; value = final expression statement, else `Unit` |
 | `val`/`var` | RHS once, eagerly, at the binding point |
 | `if c then a else b` | `c`, then one branch (short-circuit) |
-| `match e with …` | `e` once; arms top-to-bottom; guard after structural match |
+| `while c do e` | `c`; if `true`: `e`, then re-test (loop) |
+| `for x in e do b` | desugars to `e.foreach { x => b }` |
+| `return e` | `e`, then exit the enclosing `fun` |
+| `match e { … }` | `e` once; arms top-to-bottom; guard after structural match |
 | `f a b` | `f`, then `a`, then `b`, then call |
 | `recv.m args` | `recv`, then args L-to-R, then dispatch |
-| `lhs /. m args` | `lhs`, then args L-to-R, then dispatch; result is next receiver |
+| `lhs .m args` | `lhs`, then args L-to-R, then dispatch; result is next receiver |
 | construction / update | base (if any), then inits L-to-R, then build |
 | `throw e` | `e`, then unwind (no later siblings) |
-| `try e with …` | `e`; on throw, clauses top-to-bottom |
+| `try e catch { … }` | `e`; on throw, clauses top-to-bottom |
+
+### 7.15 Built-in operator semantics (MVP)
+
+- **Arithmetic** `+ - * / %` is defined on operands of one matching numeric primitive type (no implicit widening, §6.2). Integer arithmetic wraps (two's complement, JVM-style). Integer `/`/`%` with a zero divisor throws `ArithmeticException`: the backend's `Lower` already inserts the divisor check (`checkDivisionByZero` → `throwDivisionByZero`), so Hi inherits this with no frontend work. Float arithmetic is IEEE-754; `NaN`/`±Inf` propagate and nothing throws.
+- **Relational** `< <= > >=` apply to numeric primitives and `Char` only; they do not chain (§4.1).
+- **Equality `==`/`!=` (judgment call, interim).** On primitives: value comparison (`Op.Comp(Ieq/Feq)`). On value `struct`s: structural field-wise equality (§6.3). On reference types: **null-safe `equals` dispatch** — `a == b` lowers to "if `a` is the null reference, test whether `b` is too; otherwise `Op.Method`-dispatch `java.lang.Object.equals`" (the Scala/Kotlin rule). Reusing javalib means `String` compares by content and box classes by value for free; a class that does not override `equals` inherits identity comparison from `Object`. Auto-derivation of `equals`/`hashCode`/`toString` for classes/records/ADTs remains Open Decision §11.3. Comparing a value type against a reference type is a compile error; reference-*identity* comparison has no operator surface in the MVP.
+- **Bitwise.** Only xor `^` is in the value-operator set; `&`/`|` are type-context-only tokens (§4.1) and there are no shift operators. The bitwise/shift surface is Open Decision §11.8.
 
 ---
 
@@ -1181,13 +1267,15 @@ Later application of an eta-expanded value goes through the SAM `apply` (`Op.Met
 
 > **Judgment call.** Hi closures `{ x, y => e }` lower to a single `scala.FunctionN` SAM (not nested `Function1`s); named `fun` currying still flattens to one method.
 
-**Blocks, `do`, `return`, and keyword-led statements.** A block lowers to a straight-line sequence of NIR instructions in textual order. A `do e` statement evaluates `e` (emitting its instructions) and discards the result — identical to `val _ = e`, so it carries no extra cost. A **non-final keyword-led** statement (`if`/`match`/`try`/`throw`) lowers exactly as the corresponding expression but with its result value dropped (an implicit `do`); a **final** one feeds the block value. `val`/`var` bindings introduce SSA locals (`var` becomes a mutable slot, §8 mutable-local handling). The block's value is the operand of a trailing `return e`, the value of a final keyword-led expression, or `Unit`; a single value-token-led body `{ e }` (or `fun f = e`) is the same as `{ return e }`. Because `return` is purely a tail value-marker (no early exit), it lowers to the function/branch result feeding the enclosing `Inst.Ret` or the join-point SSA value — never to mid-body control flow. (`do`/`return` are statement *syntax* only; they introduce no NIR nodes of their own.)
+**Blocks, expression statements, `return`, and loops.** A block lowers to a straight-line sequence of NIR instructions in textual order; a non-final expression statement is evaluated and its result discarded (no extra cost). `val`/`var` bindings introduce SSA locals (`var` becomes a mutable `Op.Var` slot). The block's value is its final expression statement's value (else `Unit`), feeding the enclosing `Inst.Ret` or the join-point SSA value. **`return e`** lowers to `Inst.Ret(v)` at the point of occurrence — NIR functions may carry multiple return blocks; there is no cleanup interaction because the MVP has no `finally`. **`while`** lowers to a header block (`Inst.If` on the condition) and a body block ending in a back-edge `Inst.Jump` to the header; mutated locals live in `Op.Var` slots, so no phi-threading is needed. **`for`** is desugared to a `foreach` call before lowering (§7.12).
+
+**SAM conversion (§7.6).** When a closure is checked against a single-abstract-method trait `T`, step 1 above sets `traits = Seq(T)` (instead of `scala.FunctionN`) and step 4's body method takes `T`'s abstract-method signature; captures and the constructor are unchanged. This is the same shape dotty emits for Java functional interfaces — NIR needs nothing new — and it is what makes `Runnable`-taking javalib APIs (threads, executors, virtual threads) directly callable with Hi closures.
 
 ### 8.2 `struct` and `class`; the GC ref-offset rule
 
 **`struct` → unboxed aggregate.** `struct S (a: Int, b: Double)` → `Type.StructValue(Seq(Int, Double))`; no `Defn.Class`, no header, no identity. Constructed via `Op.Insert`/`Val.StructValue`; fields read with `Op.Extract`. Field order is declaration order.
 
-**MVP value-struct restriction (hard rule).** A `struct` may contain only primitives and `Ptr` (checked on each field's declared, unboxed type; box classes are rejected). *Grounding:* `MemoryLayout.referenceFieldsOffsets` collects offsets only for top-level `RefKind` fields plus the one synthetic shape `StructValue(RefKind :: ArrayValue(Byte, n) :: Nil)` (ref + alignment padding from `ofAlignedFields`); it does **not** descend into a general multi-field `StructValue`. `fieldOffsets` likewise treats a `StructValue` as one offset slot. A managed ref inside a general value struct that is a heap-object field is invisible to the precise scan and may be collected prematurely. Stack-only value structs with refs are deferred.
+**MVP value-struct restriction (hard rule).** A `struct` may contain only primitives, `Ptr`, and nested all-primitive/`Ptr` structs (checked on each field's declared, unboxed type; box classes are rejected). *Grounding:* `MemoryLayout.referenceFieldsOffsets` collects offsets only for top-level `RefKind` fields plus the one synthetic shape `StructValue(RefKind :: ArrayValue(Byte, n) :: Nil)` (ref + alignment padding from `ofAlignedFields`); it does **not** descend into a general multi-field `StructValue`. `fieldOffsets` likewise treats a `StructValue` as one offset slot. A managed ref inside a general value struct that is a heap-object field is invisible to the precise scan and may be collected prematurely. Stack-only value structs with refs are deferred.
 
 **`class` → `Defn.Class`.** `class C (x: Int, next: C)` lowers to:
 
@@ -1209,7 +1297,7 @@ A sealed ADT `type Option[A] = | Some of A | None` lowers to:
 
 > **Judgment call.** A nullary variant (`None`, `Leaf`) lowers to a **singleton module** `Option$None$` (reusing the module-accessor machinery, §8.5), mirroring Scala 3 `case object`s and avoiding per-use garbage.
 
-**`match e with | Some x => a | None => b`** lowers exactly the way the backend already discriminates sealed types — **not** via a tag field/integer switch. The plugin emits `Inst.Switch` *only* for literal/primitive-value scrutinees; constructor/sealed-type discrimination uses `Op.Is`/`Op.As` type tests, which `Lower` compiles to a **class-id range check** against the linker-assigned id interval in RTTI (`idRangeUntil`). Therefore:
+**`match e { | Some x => a | None => b }`** lowers exactly the way the backend already discriminates sealed types — **not** via a tag field/integer switch. The plugin emits `Inst.Switch` *only* for literal/primitive-value scrutinees; constructor/sealed-type discrimination uses `Op.Is`/`Op.As` type tests, which `Lower` compiles to a **class-id range check** against the linker-assigned id interval in RTTI (`idRangeUntil`). Therefore:
 
 - For each non-default arm, emit `Op.Is(Type.Ref(Option$Some), e)` (a single class-id range comparison over the sealed hierarchy's contiguous id range), branch with `Inst.If`.
 - On the matched branch, `Op.As(Type.Ref(Option$Some), e)` then `Op.Fieldload` to bind payload fields.
@@ -1234,6 +1322,8 @@ Module access and lazy init are provided by the backend (`Generate.genModuleAcce
 
 > **Lazy-init note (cross-ref §8.9).** Top-level `object` `val`s initialize via the module's `Sig.Ctor(Seq.empty)`, run **lazily on first `Op.Module(name)`**, *not* eagerly at program start. Only members with an explicit `Sig.Clinit` are invoked eagerly by `genMain`'s class-initializer calls.
 
+> **Top-level (package-level) `fun`/`val` items** (outside any `object`) lower to a synthesized module `<package>.package$` (Scala-3-style top-level definitions); imports resolve such members through it. Hi's `std.io.{print, println, printf}` (§10.2) are package-level `fun`s of `std.io.package$`.
+
 > **Cyclic-init diagnostic — judgment call.** The **static front-end dependency-graph cycle check is the sole mechanism**: the module-forces-module graph is analyzed at compile time, and a cycle is a compile error. A runtime sentinel guard is **not** viable on the multithreaded path: the Hi-emitted ctor receives only `(self)` and does not control the slot-write ordering relative to the C loader (`__scalanative_loadModule` provides thread-safe one-time init but exposes no re-entrancy hook). A debug-only "initializing" sentinel is possible *only* on single-threaded builds and cannot piggyback on the multithreaded loader; it is not relied upon.
 
 ### 8.6 Structural records & functional update
@@ -1242,13 +1332,13 @@ Module access and lazy init are provided by the backend (`Generate.genModuleAcce
 
 - **Deterministic, cross-unit-stable name** `scala.scalanative.hi.record.R$<hash>`, where `<hash>` is over the **sorted** sequence of `(fieldName, Type.mangle(fieldType))` pairs. Sorting before hashing makes the name order-independent, so `(x: Int, y: Int)` and `(y: Int, x: Int)` produce the same `Global.Top`; the closed-world linker deduplicates identical definitions across units.
 - **Canonical physical layout:** fields stored in sorted field-name order, so the RTTI ref-offset bitmap is identical regardless of source order. Access `r.x` → `Op.Fieldload`.
-- A literal `(x = 1, y = 2)` → `Op.Classalloc(R$<hash>)` + ctor with args reordered into canonical order. One-field `(x = 1,)` is the arity-1 record.
+- A literal `(x = 1, y = 2)` → `Op.Classalloc(R$<hash>)` + ctor with args reordered into canonical order. One-field `(x = 1)` is the arity-1 record.
 
-**Functional update.** `(..base, y = 9)` / `base with (y = 9)` require `base`'s full static type (no row polymorphism). Lowering is a full rebuild: evaluate `base` into a temp, construct a fresh instance of the same canonical record class / struct, copying unchanged fields (`Op.Fieldload`/`Op.Extract`) and substituting overrides. Class → `Op.Classalloc` + ctor; value struct → `Op.Insert`s on a fresh `Val.StructValue`. Override is last-wins.
+**Functional update.** `base with (y = 9)` requires `base`'s full static type (no row polymorphism). Lowering is a full rebuild: evaluate `base` into a temp, construct a fresh instance of the same canonical record class / struct, copying unchanged fields (`Op.Fieldload`/`Op.Extract`) and substituting overrides. Class → `Op.Classalloc` + ctor; value struct → `Op.Insert`s on a fresh `Val.StructValue`. Override is last-wins.
 
 ### 8.7 Extension methods → static calls
 
-`extension (x: T) { fun m (a) = ... }` lowers each method to a **static `Defn.Define`** whose first parameter is the receiver `T` (`Sig.Method("m", Seq(T, A, Ret), Sig.Scope.PublicStatic)`). A call `v.m a` or chain `v /. m a` lowers to a direct static `Op.Call` — no virtual dispatch, no boxing of the receiver. `3 /. add 4 /. times 5 /. neg` lowers to nested calls `neg(times(add(3, 4), 5))`; each step is a static `Op.Call` (extension) or `Op.Method` (class method), never a free-function lookup.
+`extension (x: T) { fun m (a) = ... }` lowers each method to a **static `Defn.Define`** whose first parameter is the receiver `T` (`Sig.Method("m", Seq(T, A, Ret), Sig.Scope.PublicStatic)`). A call `v.m a` or chain `v .m a` lowers to a direct static `Op.Call` — no virtual dispatch, no boxing of the receiver. `3.add 4 .times 5 .neg` lowers to nested calls `neg(times(add(3, 4), 5))`; each step is a static `Op.Call` (extension) or `Op.Method` (class method), never a free-function lookup.
 
 ### 8.8 `given` / `using` → dictionary passing
 
@@ -1268,7 +1358,7 @@ No runtime implicit search; resolution is entirely compile-time.
 - `java.lang.String` = `Rt.String`, with **exactly four fields** `value, offset, count, cachedHashCode` (`Rt.jlStringFields`). Hi string literals lower to instances of this class and must honor the 4-field layout.
 - **`scala.FunctionN` (N = 0..22)** — the function/SAM traits used for closures and eta-expansion (`Types.typeToName` ↦ `scala.Function${arity}`).
 - Primitive **box classes** and box/unbox maps from `Type.box`/`Type.unbox` (`java.lang.Integer ↔ Type.Int`, `scala.scalanative.unsafe.Ptr ↔ Type.Ptr` = `Rt.BoxedPtr`). Boxing `Op.Box(refTy, v)`; unboxing `Op.Unbox(boxTy, v)`. (A *boxed* primitive/`Ptr` is a managed reference and is therefore rejected as a `struct` field — §8.2.)
-- **Typed arrays**: `Type.Array(elemTy)` selects the runtime array class (`IntArray`, …, `ObjectArray`) via `Rt.arrayAlloc`. Ops: `Op.Arrayalloc`/`Op.Arrayload`/`Op.Arraystore`/`Op.Arraylength`.
+- **Typed arrays**: `Type.Array(elemTy)` selects the runtime array class (`IntArray`, …, `ObjectArray`) via `Rt.arrayAlloc`. Ops: `Op.Arrayalloc`/`Op.Arrayload`/`Op.Arraystore`/`Op.Arraylength`. An **array literal** `[e1, …, en]` (§5.6) lowers to `Op.Arrayalloc` (with a constant `Val.ArrayValue` initializer when all elements are constants) followed by `Op.Arraystore`s; `xs.get i` / `xs.set i v` / `xs.length` map 1:1 onto the load/store/length ops with the runtime's existing bounds-check semantics.
 - `scala.scalanative.runtime.*` (the `Runtime` module, primitive markers, `BoxedUnit`); `Type.Unit ↔ Rt.BoxedUnit`.
 
 Because Hi is the in-repo module compiled against `tools`, it is always NIR-format-version matched and reads these constants from `nir.Rt` rather than re-declaring names.
@@ -1287,7 +1377,7 @@ Everything else (saturated calls, class/field/ctor emission, modules, entry poin
 
 ## 9. Example Programs
 
-Six complete programs using only locked features and kept conventions. All output is via `scala.scalanative.libc` using C-string literals `c"..."` (§3.6) passed as bounded juxtaposed arguments (no Scala-style varargs, which Hi does not have). A function-application result used as an argument is always parenthesized (§4.3). Per the whitespace-insignificant model (§3.1, §3.4): an effectful expression is introduced by `do`, a block's value by a trailing `return`, and a single-expression function body is written `= expr` (no block); newlines and `;` are insignificant.
+Six complete programs using only locked features and kept conventions. Output uses Hi's minimal standard library **`std.io`** (§10.2): `println (line: String): Unit` and the curried `printf (fmt: String) (args: Array[Object]): Unit`, whose format semantics are `java.util.Formatter`'s. Arguments are passed as **one array literal** (the varargs idiom, §5.6) — inside the brackets, elements are full comma-separated expressions and primitives box against `Array[Object]` (§6.8). Raw libc and `c"..."` remain available for FFI but are not used here. Statements are newline-terminated (§3.4); a block's last expression is its value; an application result used as a (non-bracketed) argument is parenthesized (§4.3).
 
 > **Style recommendation (not a grammar rule).** Single-field ADT variants use positional payloads (`Num(2.0)` / `Num(n)`); multi-field variants use named record payloads (`Add(l = …, r = …)`).
 
@@ -1296,27 +1386,27 @@ Six complete programs using only locked features and kept conventions. All outpu
 ```hi
 package examples.hello
 
-import scala.scalanative.libc.stdio.printf
+import std.io.println
 
 object Main {
   fun main (args: Array[String]): Unit = {
-    do printf c"Hello, Hi!\n"
+    println "Hello, Hi!"
   }
 }
 ```
 
 - `object Main` → NIR module `Main$` exposing `main([Ljava.lang.String;)Unit` (`Rt.ScalaMainSig`), the reachability root.
-- `do printf c"..."` is a statement: whitespace application to one bounded C-string argument, its `Int` result discarded (`do e` ≡ `val _ = e`). The block has no `return`, so `main` yields `Unit`.
-- Prints `Hello, Hi!`; only `printf`, the C-string machinery, and the entry shim survive linking.
+- `println "Hello, Hi!"` is a bare expression statement (§3.4): whitespace application to one bounded `String` argument; its `Unit` value is the block's — and `main`'s — value.
+- `println` is a package-level `fun` of `std.io` (§10.2), delegating to javalib `System.out`; the linker prunes everything unreachable.
 
 ### 9.2 Value structs, records, functional update
 
 ```hi
 package examples.records
 
-import scala.scalanative.libc.stdio.printf
+import std.io.printf
 
-// Value type: only primitives, so GC-safe as a by-value aggregate.
+// Value type: only primitives, so GC-safe as a by-value aggregate (§6.3).
 struct Point (x: Int, y: Int)
 
 // Structural record TYPE: identity is the field-name set + types, order-independent.
@@ -1329,41 +1419,51 @@ object Main {
     val shifted = origin with (x = 10)          // Point(x = 10, y = 0); 'origin' unchanged
 
     val player = (name = "Ada", score = 99)
-    val promoted = (..player, score = 100)      // (name = "Ada", score = 100)
+    val promoted = player with (score = 100)    // (name = "Ada", score = 100)
 
-    do printf c"%d,%d -> %s:%d\n" shifted.x shifted.y (describe promoted) promoted.score
+    var i = 0
+    var sum = 0
+    while i < 3 do {
+      sum = sum + promoted.score
+      i = i + 1
+    }
+
+    printf "%d,%d -> %s:%d (sum=%d)\n" [shifted.x, shifted.y, describe promoted, promoted.score, sum]
   }
 }
 ```
 
 - `origin` and `shifted` are distinct values (structs have no identity, copied).
 - `shifted` is `Point(x = 10, y = 0)` (full rebuild overriding only `x`); `promoted` is `(name = "Ada", score = 100)` while `player` still reads `99`.
-- `(describe promoted)` is parenthesized because an application result is not a bounded argument. Each remaining value is a bounded juxtaposed argument to `printf`.
-- Output: `10,0 -> Ada:100`.
+- The `while` loop (§7.12) accumulates with `var`s; the assignments are bare expression statements (§3.4).
+- The `printf` arguments arrive as **one array literal**: inside `[...]` newlines/commas delimit, so `describe promoted` needs no extra parentheses; `Int`s box against `Array[Object]` (§6.8), and `%s` with a managed `String` is fine — formatting happens in Hi/javalib, not in C.
+- Output: `10,0 -> Ada:100 (sum=300)`.
 
 ### 9.3 ADTs, pattern matching, exhaustiveness
 
 ```hi
 package examples.adt
 
-import scala.scalanative.libc.stdio.printf
+import std.io.printf
 
 type Tree[A] =
   | Leaf
   | Node of (left: Tree[A], value: A, right: Tree[A])
 
 fun insert (t: Tree[Int]) (x: Int): Tree[Int] =
-  match t with
+  match t {
   | Leaf => Node(left = Leaf, value = x, right = Leaf)
   | Node(left = l, value = v, right = r) =>
       if x < v then Node(left = insert l x, value = v, right = r)
       else if x > v then Node(left = l, value = v, right = insert r x)
       else t
+  }
 
 fun sumTree (t: Tree[Int]): Int =
-  match t with
+  match t {
   | Leaf => 0
   | Node(left = l, value = v, right = r) => sumTree l + v + sumTree r
+  }
 
 object Main {
   fun main (args: Array[String]): Unit = {
@@ -1371,7 +1471,7 @@ object Main {
     val t1 = insert t0 5
     val t2 = insert t1 3
     val t3 = insert t2 8
-    do printf c"sum = %d\n" (sumTree t3)
+    printf "sum = %d\n" [sumTree t3]
   }
 }
 ```
@@ -1379,15 +1479,16 @@ object Main {
 - Dropping any `match` arm is a **compile error** (non-exhaustive sealed ADT).
 - Each `match` lowers to a class-id range-test decision tree; `Node(...)` binds the named record-payload fields.
 - Curried `insert t0 5` is saturated → a single flat NIR call, not a closure.
-- `(sumTree t3)` is parenthesized (application result as argument).
+- `sumTree t3` needs no parentheses as an array-literal element (the brackets bound it).
+- Recursion suits this tree-shaped data; unbounded iteration should prefer loops, since Hi guarantees no tail-call elimination (§7.12).
 - Output: `sum = 16` (3 + 5 + 8).
 
-### 9.4 Traits, impl, extensions, and `/.`
+### 9.4 Traits, impl, extensions, and chain selection
 
 ```hi
 package examples.chains
 
-import scala.scalanative.libc.stdio.printf
+import std.io.printf
 
 trait Show[A] {
   fun show (self: A): String
@@ -1405,23 +1506,31 @@ extension (n: Int) {
 
 object Main {
   fun main (args: Array[String]): Unit = {
-    // '/.' at application precedence, left-associative:
-    //   3 /. add 4 /. times 5 /. neg  ===  call structure ((3.add 4).times 5).neg
-    val chained = 3 /. add 4 /. times 5 /. neg   // -35
-    do printf c"chain = %d\n" chained
+    // chain selection ' .m' at application precedence, left-associative:
+    //   3.add 4 .times 5 .neg  ===  call structure ((3.add 4).times 5).neg
+    val chained = 3.add 4 .times 5 .neg          // -35
+    printf "chain = %d\n" [chained]
 
-    val s = 3 /. show                            // uses impl Show[Int] for Int
-    do printf c"shown = %s\n" s
+    // multi-line chains continue on a leading '.' (§3.4 rule 3):
+    val chained2 =
+      3.add 4
+        .times 5
+        .neg
+    printf "chain2 = %d\n" [chained2]
+
+    val s = 3 .show                              // uses impl Show[Int] for Int
+    printf "shown = %s\n" [s]
   }
 }
 ```
 
-- `3 /. add 4 /. times 5 /. neg` = `-35`: parsed `((3 /. add 4) /. times 5) /. neg`, each result the next receiver. `add`/`times`/`neg` resolve as extensions on `Int`.
-- `neg` is a **nullary** extension getter (`fun neg: Int = …`, zero parameter lists): it is always saturated and used as a zero-arg `/.` step yielding `Int`, never a closure.
-- `3 /. show` exercises `impl Show[Int] for Int`.
+- `3.add 4 .times 5 .neg` = `-35`: each whitespace-preceded `.` re-threads the accumulated result as the next receiver (§4.2). `add`/`times`/`neg` resolve as extensions on `Int`.
+- `neg` is a **nullary** extension getter (`fun neg: Int = …`, zero parameter lists): always saturated, used as a zero-arg chain step yielding `Int`, never a closure.
+- `3 .show` (or tight `3.show` — identical here, the receiver is a primary) exercises `impl Show[Int] for Int`.
 - Output:
   ```
   chain = -35
+  chain2 = -35
   shown = Int(...)
   ```
 
@@ -1430,7 +1539,7 @@ object Main {
 ```hi
 package examples.classes
 
-import scala.scalanative.libc.stdio.printf
+import std.io.printf
 
 class Animal (name: String) {
   fun speak (self): String = "..."          // 'self' type defaults to Animal
@@ -1453,12 +1562,12 @@ object Main {
     val mimi: Animal = Cat(name = "Mimi")
 
     // Dynamic dispatch on the runtime class of each receiver:
-    do printf c"%s says %s\n" rex.name rex.speak    // 'rex.speak' is nullary selection
-    do printf c"%s says %s\n" mimi.name mimi.speak
+    printf "%s says %s\n" [rex.name, rex.speak]     // 'rex.speak' is nullary selection
+    printf "%s says %s\n" [mimi.name, mimi.speak]
 
     val t0 = Tally(count = 0)
     val t1 = t0 with (count = t0.count + 1)
-    do printf c"tally t0=%d t1=%d\n" t0.count t1.count
+    printf "tally t0=%d t1=%d\n" [t0.count, t1.count]
   }
 }
 ```
@@ -1467,7 +1576,8 @@ object Main {
 - `speak` is declared `fun speak (self): String` (one self list, nullary in arguments): `rex.speak` is a nullary selection invoked immediately and dispatched dynamically — `woof` / `meow`.
 - `<: Animal(name)` is a super-constructor call (§5.3, §8.2) supplying `name` to `Animal`'s ctor.
 - `Tally` holds only an `Int`, legal under the value-struct rule; `t0 with (count = …)` builds a fresh `Tally`, and `t0.count` still reads `0`.
-- A `name: String` field is legal on the **class** (heap, precise RTTI) but would be **rejected inside `struct Tally`**.
+- A `name: String` field is legal on the **class** (heap, precise RTTI) but would be **rejected inside `struct Tally`** (§6.3).
+- `%s` with managed `String`s is fine: `std.io.printf` formats in Hi/javalib, not in C.
 - Output:
   ```
   Rex says woof
@@ -1480,7 +1590,7 @@ object Main {
 ```hi
 package examples.eval
 
-import scala.scalanative.libc.stdio.printf
+import std.io.printf
 
 type Expr =
   | Num of Double
@@ -1493,7 +1603,7 @@ type Expr =
 class DivByZero (msg: String) <: Throwable(msg)
 
 fun eval (e: Expr): Double =
-  match e with
+  match e {
   | Num(n)            => n
   | Add(l = a, r = b) => eval a + eval b
   | Sub(l = a, r = b) => eval a - eval b
@@ -1501,13 +1611,15 @@ fun eval (e: Expr): Double =
   | Div(l = a, r = b) => {
       val rv = eval b
       if rv == 0.0 then throw DivByZero("division by zero")
-      else eval a / rv                     // final keyword-led expr = block value (no `return` needed)
+      else eval a / rv                     // final expression = the block's value
     }
+  }
 
 fun safeEval (e: Expr): (ok: Bool, value: Double) =
   try (ok = true, value = eval e)
-  with
+  catch {
   | ex : DivByZero => (ok = false, value = 0.0)
+  }
 
 object Main {
   fun main (args: Array[String]): Unit = {
@@ -1522,23 +1634,23 @@ object Main {
     val r1 = safeEval good
     val r2 = safeEval bad
 
-    do printf c"good: ok=%d value=%g\n" r1.ok r1.value
-    do printf c"bad:  ok=%d value=%g\n" r2.ok r2.value
+    printf "good: ok=%s value=%s\n" [r1.ok, r1.value]
+    printf "bad:  ok=%s value=%s\n" [r2.ok, r2.value]
   }
 }
 ```
 
 - `eval` is exhaustive over the five variants (omitting any arm is a compile error). The `match` lowers to a class-id range-test decision tree.
-- `safeEval good` returns `(ok = true, value = 10.0)`; `safeEval bad` throws `DivByZero`, caught by the **typed** handler pattern `ex : DivByZero`, returning `(ok = false, value = 0.0)`.
+- `safeEval good` returns `(ok = true, value = 10.0)`; `safeEval bad` throws `DivByZero`, caught by the **typed** `catch` pattern `ex : DivByZero`, returning `(ok = false, value = 0.0)`. (`try parse … catch …` continues across the line break: `catch` cannot begin a statement, §3.4 rule 3.)
 - `DivByZero` is a reference `class` extending `Throwable` via the super-ctor call `<: Throwable(msg)` (only classes carry managed references). Construction uses `T(...)` (no `new`).
 - The result type is the structural record `(ok: Bool, value: Double)` (`Bool`, not `Boolean`).
-- Output:
+- Output (boxed values render via `Formatter` `%s`):
   ```
-  good: ok=1 value=10.000
-  bad:  ok=0 value=0.000
+  good: ok=true value=10.0
+  bad:  ok=false value=0.0
   ```
 
-> **Note (virtual threads).** Reusing the backend's Loom-style virtual threads (`Thread.ofVirtual()`) is possible but is **not** demonstrated here: it requires closure→Java-SAM (`Runnable`) conversion, which the MVP does not define (Hi closures lower to `scala.FunctionN`, not arbitrary Java functional interfaces). Virtual threads remain an opt-in reuse, not a frontend feature (§2, §8.9).
+> **Note (virtual threads).** With closure→SAM conversion in the MVP (§7.6, §8.1), a Hi closure satisfies `java.lang.Runnable`, so the backend's Loom-style virtual threads are directly reusable: `Thread.ofVirtual.start { => doWork () }` — `Thread.ofVirtual` is a (nullary) javalib static selected as a path, and `.start` takes the closure as its `Runnable`. A worked concurrency example is deferred to the collections/I-O milestone.
 
 ---
 
@@ -1572,6 +1684,20 @@ Hi does **not** ship a minimal runtime. It depends on the published / in-repo **
 
 These appear on the classpath as `.nir` entries; the closed-world linker prunes them to exactly what the program uses. Hi adds its own emitted `.nir` to that classpath.
 
+#### Hi standard library (`std.*`)
+
+Hi additionally ships a small **Hi-authored standard library**, compiled to NIR once and placed on the same classpath. MVP surface — `std.io`:
+
+```hi
+package std.io
+
+fun print   (s: String): Unit = ...                          // delegates to java.lang.System.out
+fun println (s: String): Unit = ...
+fun printf  (fmt: String) (args: Array[Object]): Unit = ...  // java.util.Formatter semantics
+```
+
+These are package-level `fun`s lowering to `std.io.package$` (§8.5); they delegate to javalib (`java.lang.System.out`, `java.lang.String.format`) by canonical name, so the linker prunes whatever is unused. The varargs idiom is an explicit `Array[Object]` parameter — Hi has no variadic functions; callers write `printf "x=%d\n" [x]` (§5.6), and primitives box at the literal (§6.8). C-variadic functions (libc `printf`) remain reachable via `c"..."`/`scala.scalanative.libc` for FFI but are not part of `std.io`.
+
 ### 10.3 The handoff: `Seq[nir.Defn]` → native binary
 
 The frontend produces a `Seq[nir.Defn]` per top-level type and writes binary NIR via the existing serializer:
@@ -1603,9 +1729,10 @@ Using.resource(...) { implicit scope =>
 Hi source (.hi)
    │
    ▼
-1. Lex            tokenize; whitespace/newlines/`;` insignificant — no NL synthesis (§3.1, §3.4)
+1. Lex + filter   tokenize; synthesize statement terminators per §3.4 (significant
+   │              newlines; `;` explicit); classify tight vs spaced '.' and '['
    ▼
-2. Parse          build the Hi AST per §5; encode '.' / '/.' / whitespace-app
+2. Parse          build the Hi AST per §5; encode tight-'.' / chain-' .m' / whitespace-app
    │              precedence and the bounded-argument rule
    ▼
 3. Name resolve   resolve packages/imports, bind identifiers, establish scopes
@@ -1617,8 +1744,8 @@ Hi source (.hi)
    │              unreachable arms (compile errors)
    ▼
 6. Desugar        functional update -> full rebuild; ADTs -> sealed base + cases;
-   │              '/.' chains -> nested receiver calls; curried 'fun' -> flat method
-   │              + eta sites; closures
+   │              'for' -> foreach; chain selections -> nested receiver calls;
+   │              curried 'fun' -> flat method + eta sites; closures (incl. SAM)
    ▼
 7. NIR emit       Seq[nir.Defn]; respect the GC field-layout rule and canonical
    │              runtime symbol names; serialize via serializeBinary
@@ -1634,9 +1761,9 @@ Phases 1–7 are Hi's new code. Phase 8 is entirely the existing Scala Native ba
 
 ## 11. Open Decisions
 
-The following are genuine choices still left to the language designer. (Items the prior review left open but that this spec *decided* — e.g. `var` inclusion, uncurried multi-param closures, return-type annotations, exhaustiveness-as-error — are noted in §2/§6/§7 as judgment calls and are **not** repeated here. Two items previously listed here — the native collections API and closure→Java-SAM conversion — have since been **decided as deferred**; see the §2.2 out-of-scope table.)
+The following are genuine choices still left to the language designer. (Items the prior review left open but that this spec *decided* — e.g. `var` inclusion, uncurried multi-param closures, return-type annotations, exhaustiveness-as-error — are noted in §2/§6/§7 as judgment calls and are **not** repeated here. The native collections API was decided-deferred (§2.2); closure→SAM conversion was subsequently **promoted into the MVP** (§2.1, §7.6).)
 
-1. **I/O entry and companion-`apply` sugar.** Distinct from the now-decided collections question: what the canonical Hi I/O entry is (vs. raw `scala.scalanative.libc`), and whether `T(...)` on a type with a companion is sugar for a factory `apply`, are unresolved.
+1. **I/O surface beyond `std.io`, and companion-`apply` sugar.** `std.io.{print, println, printf}` (§10.2) is the decided MVP entry; the fuller I/O design (stdin, files, errors) and whether `T(...)` on a type with a companion is sugar for a factory `apply` remain unresolved.
 
 2. **Numeric conversions.** With no implicit widening, the exact set and naming of explicit conversion methods (`toLong`, `toDouble`, …) and whether unsigned/`Size`/`Ptr` arithmetic is exposed is unspecified.
 
@@ -1644,8 +1771,10 @@ The following are genuine choices still left to the language designer. (Items th
 
 4. **Visibility / access control.** The spec distinguishes "public/top-level" from "local" for inference purposes but defines no `private`/`internal` modifier surface or module-visibility rules.
 
-5. **Effect/concurrency surface beyond OS threads.** The MVP exposes none of the backend's delimited continuations or virtual threads as language features. If a future version surfaces structured concurrency or effects, the reserved keywords (`effect`, `handle`, `resume`, `do`, `yield`) anticipate it but the design is open. (Note: ergonomic *reuse* of the backend's existing virtual threads is gated on the deferred closure→SAM rule, §2.2.)
+5. **Effect/concurrency surface beyond OS threads.** The MVP exposes none of the backend's delimited continuations or virtual threads as language features. If a future version surfaces structured concurrency or effects, the reserved keywords (`effect`, `handle`, `resume`, `yield`) anticipate it but the design is open. (Note: ergonomic *reuse* of the backend's existing virtual threads is unblocked — closure→SAM conversion is in the MVP, §7.6.)
 
 6. **Pattern-matching depth.** Whether single-field reference classes support positional destructuring (`DivByZero(_)`) in addition to typed patterns (`ex : DivByZero`), nested guards beyond per-arm `if`, and named-binding combinations (`x @ p`) at full generality are partially specified; the exact accepted pattern algebra for nominal classes may need tightening.
 
 7. **Cross-unit canonical-record hashing collisions.** §8.6 derives record class names from a hash of the sorted signature; the hash width and collision-resolution policy (fall back to full mangled signature on collision?) is left to the implementer.
+
+8. **Bitwise and shift operators.** The value-operator set has xor `^` but no bitwise and/or/shifts, because `&` and `|` are type-context-only tokens (§4.1). Candidates: word-named extension methods on the integer types (`band`/`bor`/`shl`/`shr`/`ushr`, OCaml-style) or new operator lexemes slotted into the §4.1 table. Needed before serious `Ptr`/flags/bit-manipulation code is writable.
