@@ -185,7 +185,7 @@ Each `RawIdent` that is not a keyword (§3.5) is classified into exactly one of:
 - **LOWER_ID** — first letter (skipping leading underscores) is lowercase, **or** the identifier contains no letter (`_`, `_1`). Denotes: value/`val`/`var` bindings, `fun` names, parameters, record/struct fields, `given` names, **type variables**.
 - **UPPER_ID** — first letter (skipping leading underscores) is uppercase. Denotes: types, `class`, `struct`, `trait`, `object`, ADT constructors, type aliases.
 
-This convention removes lookahead ambiguity: in `f x`, `f` is necessarily a value (LOWER_ID), so this is application; in `Point(...)`, `Point` is a type/constructor (UPPER_ID), so this is construction.
+This convention also tells the elaborator how to lower an application: in `f x`, `f` is a value (LOWER_ID), so this is a plain call; in `Point(...)`, `Point` is a type/constructor (UPPER_ID), so the same application syntax lowers to construction (§7.7). Both are *parsed* identically as application (v0.3); only the head's case decides the lowering.
 
 **No user-defined symbolic operators.** The operator lexemes are a fixed, closed set (§4). Symbolic/backtick operator definitions are out of MVP scope; this keeps the precedence table total and statically known.
 
@@ -248,7 +248,7 @@ throw   try   catch   while   for   in   true   false
 - `throw`/`try`/`catch` — the only error-handling forms: `try e catch { | P => h … }` (§7.11).
 - `true`/`false` — boolean literals lexed as keywords.
 
-> **Note.** `new` is **not** a keyword. Construction is always `T(...)`; there is no `new`.
+> **Note.** `new` is **not** a keyword. Construction is constructor application `T(...)` (§7.7); there is no `new`.
 
 **Reserved-for-future keywords** (lexed as keywords, rejected by the parser with a "reserved for future use" diagnostic):
 
@@ -857,7 +857,7 @@ struct Vec2 (x: Double, y: Double)
 
   *Lift path (post-MVP, contained).* The markers (immix/commix `Marker.c`) walk an arbitrary `-1`-terminated offset array from RTTI, so this restriction can be removed without touching GC C code: make `referenceFieldsOffsets` recurse into nested `StructValue` fields and emit `outer + inner` offsets for interior references. Alternatively the frontend can flatten ref-carrying structs into their enclosing class/record (SROA — semantics-preserving because structs have no identity or interior pointers). `Array[struct-with-refs]` remains deferred either way (typed-array classes carry no per-element ref maps).
 
-- **Construction:** `Vec2(x = 1.0, y = 2.0)`. **Functional update:** `base with (x = 3.0)` (§6.6).
+- **Construction:** constructor application `Vec2(x = 1.0, y = 2.0)` (§7.7 — `Vec2` is a first-class constructor function). **Functional update:** `base with (x = 3.0)` (§6.6).
 
 #### `class` — reference type
 
@@ -868,7 +868,7 @@ class Box (value: Object)        // legal: managed ref lives on the heap
 
 - **Semantics:** heap-allocated; has identity; single-class inheritance + trait implementation; participates in `<:`.
 - **NIR lowering:** `Defn.Class` with `Defn.Var` fields and `Defn.Define`/`Defn.Declare` methods; instances are `Type.Ref`. Every class roots at `java.lang.Object`. It gets a precise reference-offset bitmap covering its `RefKind` fields, so it may freely hold managed references.
-- **Construction:** `Counter(n = 0)`. **Functional update:** `base with (field = v)` produces a *new* instance (§6.6).
+- **Construction:** constructor application `Counter(n = 0)` (§7.7). **Functional update:** `base with (field = v)` produces a *new* instance (§6.6).
 
 #### Subtyping `<:` (reference types only)
 
@@ -1248,7 +1248,7 @@ fun indexOf (xs: Array[Int]) (x: Int): Int = {
 | `f a b` | `f`, then `a`, then `b`, then call |
 | `recv.m args` | `recv`, then args L-to-R, then dispatch |
 | `lhs .m args` | `lhs`, then args L-to-R, then dispatch; result is next receiver |
-| construction / update | base (if any), then inits L-to-R, then build |
+| construction (constructor application) / update | base (if any), then inits L-to-R, then build |
 | `throw e` | `e`, then unwind (no later siblings) |
 | `try e catch { … }` | `e`; on throw, clauses top-to-bottom |
 
