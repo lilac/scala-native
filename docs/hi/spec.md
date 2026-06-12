@@ -1,8 +1,10 @@
-# Hi Language Specification — v0.2
+# Hi Language Specification — v0.3
 
 > A statically-typed, expression-oriented, native-compiled language implemented as a new frontend that emits Scala Native's NIR and reuses the entire Scala Native backend.
 
-> **Changes from v0.1.** (1) **Significant newlines**: statements are newline-terminated (§3.4); the `do` effect-marker and tail-`return` value-marker are removed; a block's last expression is its value. (2) **`return` is early function exit** (Java/Rust semantics, §7.13). (3) **`while`/`for` loops** join the MVP (§7.12) — `while c do e`, `for x in e do body`; `do` now introduces loop bodies. (4) **Chain selection ` .m`** (whitespace-preceded dot) replaces the `/.` operator (§4.2). (5) **Array literals** `[1, 2, 3]` (spaced `[`) and the array-argument varargs idiom join the MVP (§5.6); tight `f[T]` remains type application. (6) **Closure → SAM conversion** joins the MVP (§7.6, §8.1), unblocking `Runnable`/virtual threads. (7) A minimal **Hi standard library** `std.io` (`print`/`println`/`printf`) replaces raw libc `printf` in the examples (§10.2). (8) **`try e catch | …`** replaces `try e with` (§7.11), removing the handler-vs-struct-update collision. (9) One-field records need no trailing comma: `(x = 1)` / `(x: Int)` (§5.7). (10) Built-in operator semantics defined (§7.15); the struct GC-restriction lift path documented (§6.3). (11) **Braced arm-blocks**: `match e { | … }` and `try e catch { | … }` — braces delimit the arms, eliminating the dangling-arm ambiguity; `with` no longer introduces match arms. (12) **Unified functional update**: `base with (f = v, …)` is the single form for records, structs, and classes; the spread form `(..base, …)` and the `..` token are removed. (13) Parser-precision fixes: innermost-delimiter newline rule; guards are operator-level expressions; an empty parameter list declares one `Unit` parameter; construction requires a tight `(`; bracket classification is token-level (§5.6 table) — `val a=[1,2,3]` is an array literal, and tight `f(x, y)` is a teaching parse error (no paren-calls) rather than a silent one-tuple application; `given` instances with members use the braced form.
+> **Changes in v0.3 (from v0.2).** (a) **OCaml-style application & first-class constructors**: parentheses are no longer whitespace-significant — `f(x, y)` ≡ `f (x, y)` applies `f` to the *tuple* `(x, y)`, while curried juxtaposition `f x y` is unchanged. Constructors are ordinary **first-class functions** (`map Some`, `val mk = Node`, `Node a`); the level-2 construction special case is gone, so a constructed value used as a juxtaposed argument or selected from needs parentheses or a chain dot (`f (Point(x=1))`, `(Point(x=1)).x` or `Point(x=1) .x`) — exactly as for any application result. Closures take a parenthesized, optionally-typed parameter list `{ (x: Int, y: String) => e }` and stay uncurried (one `FunctionN`, tuple-applied) (§4, §5.4, §7.6).
+
+> **Changes in v0.2 (from v0.1).** (1) **Significant newlines**: statements are newline-terminated (§3.4); the `do` effect-marker and tail-`return` value-marker are removed; a block's last expression is its value. (2) **`return` is early function exit** (Java/Rust semantics, §7.13). (3) **`while`/`for` loops** join the MVP (§7.12) — `while c do e`, `for x in e do body`; `do` now introduces loop bodies. (4) **Chain selection ` .m`** (whitespace-preceded dot) replaces the `/.` operator (§4.2). (5) **Array literals** `[1, 2, 3]` (spaced `[`) and the array-argument varargs idiom join the MVP (§5.6); tight `f[T]` remains type application. (6) **Closure → SAM conversion** joins the MVP (§7.6, §8.1), unblocking `Runnable`/virtual threads. (7) A minimal **Hi standard library** `std.io` (`print`/`println`/`printf`) replaces raw libc `printf` in the examples (§10.2). (8) **`try e catch | …`** replaces `try e with` (§7.11), removing the handler-vs-struct-update collision. (9) One-field records need no trailing comma: `(x = 1)` / `(x: Int)` (§5.7). (10) Built-in operator semantics defined (§7.15); the struct GC-restriction lift path documented (§6.3). (11) **Braced arm-blocks**: `match e { | … }` and `try e catch { | … }` — braces delimit the arms, eliminating the dangling-arm ambiguity; `with` no longer introduces match arms. (12) **Unified functional update**: `base with (f = v, …)` is the single form for records, structs, and classes; the spread form `(..base, …)` and the `..` token are removed. (13) Parser-precision fixes: innermost-delimiter newline rule; guards are operator-level expressions; an empty parameter list declares one `Unit` parameter; bracket classification is token-level (§5.6 table) — `val a=[1,2,3]` is an array literal (the construction / paren-call rules introduced here were superseded by v0.3's OCaml application model, above); `given` instances with members use the braced form.
 
 ---
 
@@ -88,7 +90,7 @@ The following principles are authoritative and shape every later section.
 
 7. **Small, orthogonal surface.** Each construct has one clear meaning and one lowering. Operators with subtle interactions (tight `.` vs chain ` .m` vs whitespace application; functional update vs intersection) are given a single precise definition each, and ambiguities are resolved by explicit precedence rather than heuristics.
 
-8. **Deterministic, bounded-lookahead parseability.** The grammar is designed to be parsed by a recursive-descent / Pratt parser with a Scala-3-style newline filter and a fixed set of *bounded* lookahead gates (closure-vs-block, the leading-`(` forms, type-context `(`, `with`-continuations) — **no general backtracking and no type-directed parsing**. Whitespace-sensitive token classification (prefix-vs-infix `-`, tight-`.` vs chain-` .m`, tight-`[`/`(` vs spaced) is decided locally by the lexer with one token of lookbehind, never by parser feedback (§4, §5.6). Where two readings would otherwise compete, the surface is shaped so the ambiguity cannot arise (e.g. braced `match`/`catch` arm-blocks close the dangling-arm question; forbidding paren-calls turns `f(x)` into a diagnostic rather than a silent one-tuple application).
+8. **Deterministic, bounded-lookahead parseability.** The grammar is designed to be parsed by a recursive-descent / Pratt parser with a Scala-3-style newline filter and a fixed set of *bounded* lookahead gates (closure-vs-block, the leading-`(` forms, type-context `(`, `with`-continuations) — **no general backtracking and no type-directed parsing**. Whitespace-sensitive token classification (prefix-vs-infix `-`, tight-`.` vs chain-` .m`, tight-`[`/`(` vs spaced) is decided locally by the lexer with one token of lookbehind, never by parser feedback (§4, §5.6). Where two readings would otherwise compete, the surface is shaped so the ambiguity cannot arise (e.g. braced `match`/`catch` arm-blocks close the dangling-arm question; `[` is whitespace-classified into type-args vs array literal, while `(` is uniformly grouping/application so it needs no such rule).
 
 9. **Erase frontend-only types.** Union (`A | B`) and intersection (`A & B`) types, like Scala 3, exist only in the frontend and are erased at the NIR level; in the MVP they are restricted to reference types.
 
@@ -108,7 +110,7 @@ This table is the authoritative MVP feature boundary. "Judgment call" rows mark 
 | --- | --- | --- |
 | Bindings | `val`, `var` | `val` immutable (default). `var` **is in the MVP** but kept minimal: a mutable **local** binding only. **Class/struct fields may also be `var`. Object/module-level `var` fields are deferred** (model module mutable state as a `class` with a `var` field). *Judgment call:* `var` plus `while`/`for` (§7.12) cover imperative iteration and accumulators. |
 | Functions | named `fun` (curried, multi-param-list); nullary `fun` permitted | Saturated call → single flat `Defn.Define`; under-application / bare `recv.m` on a non-nullary method → eta-expanded closure. A **nullary** method/getter (zero remaining argument lists) is always saturated and invoked by selection. |
-| Lambdas | `{ x => e }`, `{ x, y => e }`, `{ (x: Int) => e }` | Closures only; `fun` is never used for lambdas. *Judgment call:* multi-param closures are **uncurried** (a single N-arg function object), distinct from curried `fun`. |
+| Lambdas | `{ x => e }`, `{ (x, y) => e }`, `{ (x: Int, y: String) => e }` | Closures only; `fun` is never used for lambdas. *Judgment call:* multi-param closures use a parenthesized list, are **uncurried** (a single N-arg function object, tuple-applied), distinct from curried `fun`. |
 | Declaration kinds | `object`, `trait`, `type` (aliases + ADTs), `struct`, `class`, `impl Trait for Type`, `extension`, `given` | Map to `Defn.Module`/`Defn.Trait`/`Defn.Class` plus `Defn.Define`s. |
 | Value vs reference types | `struct` (value), `class` (reference) | `struct`: no identity, no inheritance; fields limited to primitives, `Ptr`, and nested all-primitive/`Ptr` structs (§6.3). `class`: heap, identity, single inheritance + traits, participates in `<:`. |
 | ADTs | sealed ML-style variants `type Option[A] = \| Some of A \| None` | Lower to a reference-backed tagged **class** hierarchy (sealed base `class` + case subclasses); `match` → class-id range-test decision tree. |
@@ -300,7 +302,7 @@ This is **the** precedence table (the grammar of §5 encodes exactly this; where
 | # | Level | Forms | Associativity |
 |---|-------|-------|---------------|
 | 1 | **Field/method selection (TIGHTEST)** | `a.b` (field or single method selection) | left |
-| 2 | **Construction / type application** | `T(...)` (nominal struct/class/variant build), `T[..]` type application | left |
+| 2 | **Type application** | `T[..]`, `f[..]` (tight `[` only) | left |
 | 3 | **Whitespace application *and* chain selection ` .m`** | `f x`, `f x y` (curried); `lhs .m a b` (whitespace-preceded dot, §4.2) | **left** (one shared level) |
 | 4 | **Prefix (unary) operators** | `-e`, `+e`, `!e` | prefix (non-assoc) |
 | 5 | **Multiplicative** | `*` `/` `%` | left |
@@ -330,13 +332,13 @@ atoms (tightest)
 
 The lexer emits one token for each of `&`/`|`/`->`; the parser selects the type interpretation by context. In *expression* contexts `|` appears only as the arm bar inside arm-blocks (§5.4); `&` never appears (intersection is a type; functional update uses `with`, §6.6).
 
-### 4.2 Selection (tight `.`), construction, and chain selection (` .m`)
+### 4.2 Selection (tight `.`) and chain selection (` .m`)
 
 **Whitespace decides between the two dots.** A `.` that is *not* preceded by whitespace (and is not inside a float literal, §3.6) is **selection** — level 1, tightest — binding to the immediately preceding primary. A `.` that *is* preceded by whitespace or a newline (and followed by a `LOWER_ID`) is **chain selection** — level 3, application precedence, left-associative, sharing the single application level with whitespace application.
 
 - **Tight `.` is tightest (level 1).** `a.f x.g y` parses as `(a.f) (x.g) y`: `a.f` is a selection yielding a callable, then whitespace-applied to args `x.g` and `y`.
-- **`.` selects; it never calls-with-parens.** There is **no** `a.f(args)` paren-call surface. *All* method arguments arrive via whitespace application (`a.f x`) or chain selection. A field or **nullary** method/getter `a.f` is invoked by the selection alone; a non-nullary method named bare (`recv.m` with no args) eta-expands to a closure (§6, §7). There is no `a.f()` spelling: a nullary call is written `a.f`.
-- **Construction is level 2, tighter than application and at-or-tighter than `.`.** `T(a).f` parses as `(T(a)).f` (construct, then select).
+- **`.` selects; method args arrive by application.** Selection `a.f` yields a callable; you apply it by juxtaposition `a.f x y` (curried) or with a tuple `a.f (x, y)`. There is **no Java-style two-arg paren-call**: `a.f(x, y)` applies the selected `a.f` to the *single* tuple `(x, y)` (parens build one argument, §4.3), so for two curried args write `a.f x y`; `a.f(x)` ≡ `a.f x` (the parens are grouping). A field or **nullary** method/getter `a.f` is invoked by the selection alone; a non-nullary method named bare (`recv.m` with no args) eta-expands to a closure (§6, §7). A nullary call is written `a.f` (no `()`).
+- **Construction is ordinary application** (v0.3): a constructor `T` is a first-class function, so `T(a)` / `T (a)` are applications, *not* a tighter primary. A field selected directly off a fresh construction therefore needs a chain dot or parentheses — `Point(x=1) .x` or `(Point(x=1)).x` — exactly like `(f x).g` (tight `.` never binds to an application result, §4.3).
 - **Chain selection ` .m` re-threads the accumulated value.** Operationally, after a primary is parsed, a left-to-right loop consumes *application tails*: a bounded argument applies the current callee to one more argument; a ` .m` step makes the accumulated value the **receiver** and selects method/extension `m`, whose subsequent bounded arguments (further tails) become its arguments. This realizes both `foo bar .m` and `3.add 4 .times 5 .neg` as genuinely same-level left-associative.
 
 **Worked example (normative).**
@@ -378,12 +380,13 @@ BoundedArg ::= Literal                     // 1, 3.0, 'c', "s", c"s", true
              | "(" Expr ")"                // parenthesized expression (any expr)
              | Tuple | NamedTuple          // (1, 2)   (x=1, y=2)   (x=1)
              | ArrayLit                    // [1, 2, 3]   (spaced '[', §5.6)
-             | Construction                 // T(...)  nominal struct/class build
-             | Closure                      // { x => e }  { x, y => e }  { (x:T) => e }
+             | Closure                      // { x => e }  { (x, y) => e }  { (x: Int) => e }
              | Block                         // { stmt* }
 ```
 
-Everything else — `if`/`match`/`while`/`for`/`throw`/`try`/`return` and any **infix** or **prefix** operator expression — is **unbounded** and must be parenthesized to be used as an argument. **Tight vs spaced `[`:** a `[` glued (no whitespace) to an identifier is a type-argument list bound to that callee — never a standalone argument; any other `[` opens an **array literal**, which *is* a bounded argument (full token-level classification table in §5.6). **Arm-blocks are not bounded arguments:** a `{` whose first significant token is `|` is an **arm-block** (§5.4), legal only after `match e` or `catch`; greedy application stops in front of it, which is what lets `match f x { | … }` parse with `f x` as the scrutinee.
+Everything else — `if`/`match`/`while`/`for`/`throw`/`try`/`return`, any **infix**/**prefix** operator expression, **and any application** (including a construction `T(...)`, since constructors are ordinary functions, §4.2) — is **unbounded** and must be parenthesized to be used as an argument.
+
+> **`(` is not whitespace-significant (v0.3).** A `(` after a callee — tight *or* spaced — is application to the parenthesized argument; only `[` and `.` are whitespace-classified (§5.6). So `f(x, y)` ≡ `f (x, y)` applies `f` to the *tuple* `(x, y)` (one argument), whereas the curried spine `f x y` passes two. This is the OCaml model: juxtaposition curries, parentheses build one tuple/record argument. **Tight vs spaced `[`:** a `[` glued (no whitespace) to an identifier is a type-argument list bound to that callee — never a standalone argument; any other `[` opens an **array literal**, which *is* a bounded argument (full token-level classification table in §5.6). **Arm-blocks are not bounded arguments:** a `{` whose first significant token is `|` is an **arm-block** (§5.4), legal only after `match e` or `catch`; greedy application stops in front of it, which is what lets `match f x { | … }` parse with `f x` as the scrutinee.
 
 **An application result used as an argument must be parenthesized.** `f (describe x)`, not `f describe x` (which is `(f describe) x`).
 
@@ -395,7 +398,8 @@ f x y            ===  ((f x) y)            // curried saturation
 g a (b + c)                                // (b + c) bounded by its parens
 h (if p then 1 else 2)                     // if-expr must be parenthesized
 map xs { x => x + 1 }                      // closure is bounded
-make Point(x=1, y=2)                       // T(...) is bounded
+make (Point(x=1, y=2))                      // construction is an application -> parenthesize as an arg
+xs.map Some                                // constructor Some passed as a first-class function
 3.add 4 .times 5 .neg                      // == ((3.add 4).times 5).neg  == -35
 sum [1, 2, 3]                              // spaced '[': array-literal argument
 map[Int] xs                                // tight '[': type application, then application
@@ -420,7 +424,7 @@ h match e { | _ => 0 }      // ERROR: match unbounded -> h (match e { | _ => 0 }
 
 > **Float dot vs selection.** A `.` immediately preceded by digits and immediately followed by a digit is part of a `FloatLit` (`3.0`). Otherwise `.` is selection (`3.field` ≡ `(3).field`).
 
-> **Judgment call (multi-param closures, cross-ref §6/§7).** A multi-parameter closure `{ x, y => e }` is a **single** N-parameter (uncurried) function value, lowering to one NIR `scala.FunctionN`. It is *not* sugar for `{ x => { y => e } }`. `f { x, y => e }` passes one binary function, never two arguments. Currying is reserved for named `fun` declarations or explicit nested closures.
+> **Judgment call (multi-param closures, cross-ref §6/§7).** A multi-parameter closure `{ (x, y) => e }` is a **single** N-parameter (uncurried) function value, lowering to one NIR `scala.FunctionN`, applied with a tuple (`g (a, b)`). It is *not* sugar for `{ x => { y => e } }`. `f { (x, y) => e }` passes one binary function, never two arguments. Currying is reserved for named `fun` declarations or explicit nested closures.
 
 ---
 
@@ -587,16 +591,17 @@ stmts       ::= ( stmt ( term stmt )* term? )?
 stmt        ::= val_decl | var_decl | fun_decl | expr   // bare expression statements (§3.4)
 
 closure     ::= "{" closure_params "=>" stmts "}"
-closure_params ::= sepBy(closure_param, ",")            // may be empty: '{ => e }'
-closure_param  ::= LOWER_ID
-                |  "(" LOWER_ID ":" type ")"
+closure_params ::= ε                                    // '{ => e }'      : Function0
+                |  LOWER_ID                             // '{ x => e }'    : Function1 (single bare param)
+                |  "(" sepBy(closure_param, ",") ")"    // '{ (x: Int, y: String) => e }' : FunctionN (uncurried)
+closure_param  ::= LOWER_ID type_ann?                   // type annotation optional
 ```
 
 > **Arm-block recognition (normative).** A `{` whose first significant token is `|` is an **arm-block**: it is never a bounded argument, a block, or a closure, and it is legal only where `match`/`catch` expect it. This is unambiguous because `|` can begin neither a statement nor a `closure_params` list — `{ |` was dead syntax before this rule. Greedy application therefore stops in front of `{ |`, so `match f x { | A => … }` parses with scrutinee `f x`, while `f x { y => e }` still passes a trailing closure. The arm-block's `{` must open on the **same logical line** as the scrutinee / the `catch` keyword (a line-leading `{` starts a new statement, §3.4 rule 3 — the Go convention). Braces make arm ownership explicit: a nested `match` closes with its own `}`, so the dangling-arm hazard (an outer arm silently captured by an inner match) cannot arise.
 
-> **Judgment call (multi-param closures).** `{ x, y => e }` is a **single** N-parameter (uncurried) closure → one `scala.FunctionN`. The empty form `{ => e }` is a `scala.Function0`. A closure body is a `stmts` sequence like any block: `{ x => log x; x + 1 }` (the last expression is the value).
+> **Judgment call (multi-param closures).** A multi-parameter closure uses a **parenthesized** list `{ (x, y) => e }` / `{ (x: Int, y: String) => e }` (types optional) and is a **single** N-parameter (uncurried) closure → one `scala.FunctionN`, applied with a tuple `f (a, b)` (§7.6). Single-param is the bare `{ x => e }`; the empty form `{ => e }` is a `scala.Function0`. There is **no** comma-without-parens form (`{ x, y => e }` is removed). Currying is reserved for named `fun` (multi param list) or explicit nesting `{ x => { y => e } }`. A closure body is a `stmts` sequence like any block: `{ x => log x; x + 1 }` (the last expression is the value).
 
-> **Closure-vs-block disambiguation (bounded lookahead).** On a `{` whose first significant token is **not** `|` (otherwise it is an arm-block, above), scan the brace body at depth 0 for `"=>"` *before* the first `term`, the matching `}`, or any token that cannot occur in `closure_params` (anything other than `LOWER_ID`, `,`, and a parenthesized `LOWER_ID : type` group). If `"=>"` is reached first **and** the prefix matches `closure_params`, it is a `closure`; otherwise a `block`. This is bounded (O(params) lookahead) because a real closure's `=>` precedes the first statement boundary.
+> **Closure-vs-block disambiguation (bounded lookahead).** On a `{` whose first significant token is **not** `|` (otherwise it is an arm-block, above), scan the brace body at depth 0 for `"=>"` *before* the first `term`, the matching `}`, or any token that cannot occur in `closure_params` (a bare `LOWER_ID`, or a single parenthesized `( … )` group). If `"=>"` is reached first **and** the prefix matches `closure_params`, it is a `closure`; otherwise a `block`. This is bounded (O(params) lookahead) because a real closure's `=>` precedes the first statement boundary.
 
 > **Block value and statement rules.** A block's statements execute in order; statement boundaries are `term`s (§3.4). The block's value is the value of its **final** statement when that statement is an expression; a block whose final statement is a declaration (or an empty block) has value `Unit`. A **non-final** expression statement's value is discarded (a compiler should warn when the discarded type is not `Unit`). Statements after an unconditional `return`/`throw` are an **"unreachable code"** compile error.
 
@@ -618,7 +623,7 @@ app_expr    ::= postfix_expr app_tail*
 app_tail    ::= call_arg                               // apply current callee to one more arg
              |  CHAIN_DOT LOWER_ID type_args?          // ' .m' — accumulated value becomes receiver (§4.2)
 
-postfix_expr ::= primary ( "." selector )*             // level 1, '.' tightest; NO paren-call
+postfix_expr ::= primary ( "." selector )*             // level 1, '.' tightest; args via application (§4.2)
 selector    ::= LOWER_ID type_args?                    // field / nullary method / method to be applied
              |  UPPER_ID                               // nested object/companion selection
 
@@ -637,12 +642,11 @@ call_arg    ::= literal
              |  paren_or_tuple
              |  named_tuple_lit
              |  array_lit
-             |  construct
              |  closure
              |  block
 ```
 
-`arg_path` is the argument-position restriction of `postfix_expr`: it may take tight-`.` selectors but may not itself absorb whitespace arguments. **`type_args` is NOT a `call_arg`**: a **tight** `[` (no preceding whitespace) is type application bound to the immediately preceding callee; a **spaced** `[` begins an `array_lit` argument (§5.6).
+`arg_path` is the argument-position restriction of `postfix_expr`: it may take tight-`.` selectors but may not itself absorb whitespace arguments. A bare constructor name (`Some`, `Node`) is an `arg_path` and so may be passed as a first-class function (`xs.map Some`); an *applied* construction `T(...)` is an application, hence not a `call_arg` — parenthesize it (`f (Point(x=1))`). **`type_args` is NOT a `call_arg`**: a **tight** `[` (no preceding whitespace) is type application bound to the immediately preceding callee; a **spaced** `[` begins an `array_lit` argument (§5.6).
 
 ### 5.6 Primary expressions and literals
 
@@ -652,8 +656,7 @@ primary     ::= literal
              |  paren_or_tuple
              |  named_tuple_lit
              |  array_lit
-             |  construct
-             |  path
+             |  path                            // incl. UPPER_ID = constructor function value
 
 literal     ::= INT_LIT | FLOAT_LIT | STRING_LIT | CSTRING_LIT | CHAR_LIT | BOOL_LIT
 
@@ -667,25 +670,23 @@ named_arg   ::= LOWER_ID "=" expr
 
 array_lit   ::= "[" sepBy(expr, ",") "]"           // spaced '[' in value position (§3.1, §4.3)
 
-construct   ::= UPPER_ID type_args? "(" sepBy(ctor_arg, ",") ")"   // 'Point(x=1, y=2)' or 'Box(42)'
-ctor_arg    ::= named_arg | expr                                   // named or positional
-
 update_expr ::= postfix_expr "with" "(" sepBy1(named_arg, ",") ")"   // 'base with (field = v)'
                                                                       // ONE form: records, structs, classes
 ```
 
+**Construction is application (v0.3).** There is no dedicated `construct` production. A type name `T` in value position is its **constructor function**; `T(args)` and `T (args)` are ordinary applications (§5.5) that the elaborator lowers to allocation when the head statically resolves to a constructor (§8.2). Positional `T(e1, …, en)` applies the constructor to the tuple of fields (in declaration order); named `T(f = e, …)` applies it to the field record. Used bare, `T` is a first-class value: `xs.map Some`, `val mk = Node`, `Node a` (where `a`'s static type is the payload). `ctor_arg` is therefore just the `paren_or_tuple` / `named_tuple_lit` argument — no special grammar.
+
 `update_expr` attaches at the postfix level inside the larger expression machinery; the parser admits `base with (…)` wherever a `postfix_expr` is followed by the `with` keyword and a `( named_arg, … )` group — and since `match` arms moved into arm-blocks, an expression-position `with` is **always** an update. (The v0.1 spread form `(..base, …)` and its `..` token are removed; `with` is the single update spelling for records, structs, and classes alike.)
 
-**Bracket classification (normative, token-level).** In expression context, every `[` and `(` is classified by **one token of lookbehind plus the intervening-whitespace flag** — no parser feedback, no semantic information:
+**Bracket classification (normative, token-level).** Only `[` is whitespace-classified; `(` is uniform. Each is decided by **one token of lookbehind plus the intervening-whitespace flag** — no parser feedback, no semantic information:
 
-| `[`/`(` glued tightly after… | `[` means | `(` means |
+| glued tightly after… | `[` means | `(` (tight **or** spaced) means |
 |---|---|---|
-| `UPPER_ID` (path/selector tail, or its closing type-args `]`) | type arguments | **construction** `T(...)` |
-| `LOWER_ID` (path/selector/callee tail) | type arguments (`map[Int]`) | **parse error** — *"Hi has no paren-calls: write `f x`, `f (e)`, or `f ()`"* |
-| `)` `]` or a literal | **parse error** — looks like indexing/a call; insert a space | **parse error** — insert a space |
-| anything else (`=` `,` `(` `[` operators, keywords, statement start) — or **any** whitespace | **array literal** | grouping / tuple / record (§5.7) |
+| `UPPER_ID` / `LOWER_ID` (path/selector/callee tail) | type arguments (`map[Int]`, `T[..]`) | **application** to the parenthesized argument — construction when the head is a constructor (`Point(x=1)`), a curried-step call otherwise |
+| `)` `]` or a literal | **parse error** — looks like indexing; insert a space | **application** to the parenthesized argument (`(f x)(y)`) |
+| anything else (`=` `,` `(` `[` operators, keywords, statement start) — or whitespace before `[` | **array literal** | grouping / tuple / record (§5.7) |
 
-Consequences: `val a=[1, 2, 3]` is an array literal (the `[` follows `=`); `map[Int] xs` type-applies; tight `xs[0]` is a type-argument parse that fails (`0` is not a type) — indexing sugar is reserved (§2.2), use `xs.get i` / `xs.set i v` / `xs.length` (§6.2); `Point(x = 1)` constructs while `Point (x = 1)` applies the value `Point` to a one-field record (typically a type error); and `f(x, y)` is a **parse error** rather than silently passing one *tuple* argument — write `f x y`. In *type* context every `[` is a type-argument block (types have no array literals); in *pattern* context `Some(x)` and `Some (x)` are equivalent (patterns have no application, so the classification does not apply).
+Consequences: `val a=[1, 2, 3]` is an array literal (the `[` follows `=`); `map[Int] xs` type-applies; tight `xs[0]` is a type-argument parse that fails (`0` is not a type) — indexing sugar is reserved (§2.2), use `xs.get i` / `xs.set i v` / `xs.length` (§6.2). `Point(x = 1)` ≡ `Point (x = 1)` both construct; `f(x, y)` ≡ `f (x, y)` both apply `f` to the tuple `(x, y)` — *not* a parse error and *not* two arguments (write `f x y` for two). A mismatch (e.g. passing a tuple where a curried first arg was expected) is caught by the **typechecker**, as in OCaml. In *type* context every `[` is a type-argument block (types have no array literals); in *pattern* context `Some(x)` and `Some (x)` are equivalent.
 
 An empty literal `[]` requires an expected type `Array[T]` (check mode); in synthesis position it is a compile error. A non-empty `array_lit` synthesizes `Array[T]` where every element checks against one element type `T`; in check mode against `Array[Object]`, primitive elements box (§6.8).
 
@@ -762,7 +763,7 @@ Right-associativity of `->` and the layering union-looser-than-intersection-loos
 5. **One-field named tuple:** `(x = 1)` is a one-field record literal (assignment is forbidden inside `( )` grouping); `(x = 1,)` is the same with a permitted trailing comma.
 6. **Closure vs block:** `{ x => x + 1 }` is a closure; `{ val a = 1; a }` is a block; `{ => e }` is a `Function0` closure.
 7. **Update vs selection:** `base with (x = 2)` is functional update (records, structs, and classes alike); `base.x` is selection.
-8. **Bracket classification:** `map[Int] xs` type-applies `map` then applies it to `xs`; `map [1, 2]` applies `map` to the array literal `[1, 2]`; `val a=[1, 2, 3]` is an array literal (the `[` follows `=`, not an identifier); `f(x, y)` is a parse error (*no paren-calls* — write `f x y`), never a one-tuple application.
+8. **Bracket classification:** `map[Int] xs` type-applies `map` then applies it to `xs`; `map [1, 2]` applies `map` to the array literal `[1, 2]`; `val a=[1, 2, 3]` is an array literal (the `[` follows `=`, not an identifier); `f(x, y)` ≡ `f (x, y)` applies `f` to the tuple `(x, y)` (one argument; write `f x y` for two).
 9. **Newline termination:** `f x ⏎ (y)` is two statements (a `(`-led line never continues an application); `xs.filter p ⏎ .map f` is one chain (leading-`.` continuation, §3.4).
 10. **Spacing around `.`:** `x.m` is tight selection on `x`; `x .m` is chain selection on the accumulated value to its left.
 11. **Arm-block vs trailing closure:** `match f x { | A => 1 | B => 2 }` — application stops before `{ |`, so the scrutinee is `f x`; `f x { y => e }` still passes a trailing closure.
@@ -1096,13 +1097,13 @@ fun area (s: Shape): Double =
 
 ### 7.6 Closures
 
-Forms: `{ x => e }`, `{ x, y => e }`, `{ (x: Int) => e }`, `{ => e }`. **`fun` is never used for lambdas.** A closure captures free names lexically (`val`/value-`struct` by value, `class` by reference). Evaluating a closure literal produces a first-class function value immediately; the body runs on each application.
+Forms: `{ x => e }` (single), `{ (x, y) => e }` / `{ (x: Int, y: String) => e }` (parenthesized list, types optional), `{ => e }` (nullary). **`fun` is never used for lambdas.** A closure captures free names lexically (`val`/value-`struct` by value, `class` by reference). Evaluating a closure literal produces a first-class function value immediately; the body runs on each application.
 
-**Multi-param closures are UNCURRIED.** `{ x, y => e }` has type `(A, B) -> R` and requires both arguments at once; it lowers to one `scala.FunctionN`, *not* `{ x => { y => e } }`. *Justification:* it matches Scala Native's existing closure runtime 1:1, keeps closure types aligned with how they are applied, and avoids two currying conventions for one `=>` token. A user who wants currying writes nested closures or a named `fun`.
+**Multi-param closures are UNCURRIED.** `{ (x, y) => e }` has type `(A, B) -> R`, takes both arguments at once, and lowers to one `scala.FunctionN`, *not* `{ x => { y => e } }`. It is **applied with a tuple** — `add (1, 2)` — consistent with the v0.3 application model (juxtaposition curries, parens build one tuple/record argument, §7.7). *Justification:* it matches Scala Native's closure runtime 1:1, is what SAM conversion needs (Java functional interfaces are uncurried), and keeps closure types aligned with how they are applied. A user who wants currying writes a named `fun` or nests closures.
 
 ```hi
-val add  = { x, y => x + y }     // (Int, Int) -> Int, applied as: add 1 2
-val inc  = { x => x + 1 }
+val add  = { (x, y) => x + y }    // (Int, Int) -> Int, applied as: add (1, 2)
+val inc  = { x => x + 1 }         // Int -> Int,        applied as: inc 41
 val pred = { (x: Int) => x > 0 }
 ```
 
@@ -1117,6 +1118,10 @@ val task: Runnable = { => doWork () }     // closure checked against a SAM inter
 ### 7.7 Whitespace application; currying & eta-expansion
 
 Application is juxtaposition: `f x y`. Only **bounded** arguments may appear unparenthesized (§4.3); unbounded args must be parenthesized. `f x + y` ≡ `(f x) + y`; `f x.g` ≡ `f (x.g)` (`.` is tighter). Evaluation order: callee, then args left-to-right, then call.
+
+**Juxtaposition curries; parentheses build one argument (v0.3).** A spine `f a b` is curried application — one argument at a time — so it partially applies (named `fun`s) and pairs with the right-associative arrow `A -> B -> R`. A parenthesized `f (a, b)` passes a **single tuple** argument `(a, b)`; `f(a, b)` (tight) means the same. So `f a b` (two args) and `f (a, b)` (one tuple) are different, exactly as in OCaml. This is also how uncurried closures and SAMs are applied (`g (a, b)`) and how constructors are called (`Point(x = 1, y = 2)` applies the constructor to its field record).
+
+**Constructors are first-class functions.** A type name `T` denotes its constructor, a value of type `payload -> T` (the payload is the positional field tuple or the named field record). Hence `xs.map Some`, `val mk = Node`, and `Node a` (with `a` the payload value) all work; applied directly (`Some x`, `Point(x=1)`) it lowers straight to allocation, and used as a bare value it eta-expands like any under-applied function (§8.1–§8.2). Nullary variants (`None`, `Leaf`) are singleton *values*, not functions.
 
 **Currying & saturation.** A named `fun` may declare multiple parameter lists; `f` has type `A -> B -> R`.
 
@@ -1153,7 +1158,7 @@ A field/method access on `null` throws `NullPointerException`.
 
 ### 7.10 Construction and functional update
 
-**Construction.** Nominal `struct`/`class`/variant: `T(field = v, …)` or positional `T(e, …)`; structural records: `(field = v, …)` (one-field `(field = v)`). All fields must be supplied (no partial records). Initializers evaluate left-to-right, then allocation: value struct → unboxed aggregate (`Op.Insert`); class → `Op.Classalloc` + field stores; structural record → deterministic canonical heap class.
+**Construction.** A type name is a constructor function (§7.7), applied like any function: nominal `struct`/`class`/variant via `T(field = v, …)` (named, → field record) or `T(e, …)` (positional, → field tuple); structural records via `(field = v, …)` (one-field `(field = v)`). All fields must be supplied (no partial records). Initializers evaluate left-to-right, then allocation: value struct → unboxed aggregate (`Op.Insert`); class → `Op.Classalloc` + field stores; structural record → deterministic canonical heap class. Because construction is application, a constructed value used as a juxtaposed argument or selected from needs parentheses / a chain dot — `f (Point(x=1))`, `Point(x=1) .x` (§4.2–§4.3).
 
 **Functional update** (type-directed sugar over a base of known static type): `base with (field = v, …)` — one form for records, structs, and classes. It **desugars to a full rebuild**: evaluate `base` once, then construct a fresh value of `base`'s static type, copying every unchanged field and applying overrides (last-wins). The static type is exactly `base`'s; no fields added/removed. **No row polymorphism**, so a generic "update any record" function is not expressible. Update is **distinct from `&`** (last-wins override vs. field-set merge with collision forbidden). The base is not mutated (value semantics for structs; a fresh object for records/classes).
 
@@ -1288,7 +1293,7 @@ Member identity is `Global.Member(owner, sig)`. Signatures: `Sig.Method(id, type
 
 Later application of an eta-expanded value goes through the SAM `apply` (`Op.Method` virtual dispatch on the function trait), matching how Scala Native invokes `scala.FunctionN`.
 
-> **Judgment call.** Hi closures `{ x, y => e }` lower to a single `scala.FunctionN` SAM (not nested `Function1`s); named `fun` currying still flattens to one method.
+> **Judgment call.** Hi closures `{ (x, y) => e }` lower to a single `scala.FunctionN` SAM (not nested `Function1`s); named `fun` currying still flattens to one method.
 
 **Blocks, expression statements, `return`, and loops.** A block lowers to a straight-line sequence of NIR instructions in textual order; a non-final expression statement is evaluated and its result discarded (no extra cost). `val`/`var` bindings introduce SSA locals (`var` becomes a mutable `Op.Var` slot). The block's value is its final expression statement's value (else `Unit`), feeding the enclosing `Inst.Ret` or the join-point SSA value. **`return e`** lowers to `Inst.Ret(v)` at the point of occurrence — NIR functions may carry multiple return blocks; there is no cleanup interaction because the MVP has no `finally`. **`while`** lowers to a header block (`Inst.If` on the condition) and a body block ending in a back-edge `Inst.Jump` to the header; mutated locals live in `Op.Var` slots, so no phi-threading is needed. **`for`** is desugared to a `foreach` call before lowering (§7.12).
 
@@ -1308,6 +1313,8 @@ Later application of an eta-expanded value goes through the SAM `apply` (`Op.Met
 - Accessors: getter `Op.Fieldload`; for a `var` field a setter `Op.Fieldstore` (`val` fields emit no setter).
 
 Instantiation `C(1, n)` → `Op.Classalloc(C, zone = None)` then a ctor `Op.Call`. Class fields are bare `nir.Type` slots, so the RTTI bitmap covers their managed references precisely — the reason managed refs must live in a `class`.
+
+> **Constructor as a first-class value (v0.3).** Because `T` is a constructor function (§7.7), a **direct** application `C(1, n)` lowers straight to `Op.Classalloc` + ctor `Op.Call` (no closure). When `T` is used **bare** as a value (`xs.map Some`, `val mk = Node`), it eta-expands exactly like an under-applied `fun` (§8.1): a synthesized `scala.FunctionN` whose `apply` performs the `Op.Classalloc` + ctor. Positional `T(e1, …, en)` fills fields in declaration order; named `T(f = e, …)` by name; both must cover every field. Nullary variants stay singleton modules (§8.3), not functions.
 
 > **Judgment call.** Hi `var` is in the MVP, minimal: mutable field → `Defn.Var` + setter; mutable local → `Op.Var`/`Op.Varstore`/`Op.Varload`. Object/module-level user `var` fields are rejected (§8.5).
 
