@@ -2,7 +2,7 @@
 
 > A statically-typed, expression-oriented, native-compiled language implemented as a new frontend that emits Scala Native's NIR and reuses the entire Scala Native backend.
 
-> **Changes in v0.3 (from v0.2).** (a) **OCaml-style application & first-class constructors**: parentheses are no longer whitespace-significant — `f(x, y)` ≡ `f (x, y)` applies `f` to the *tuple* `(x, y)`, while curried juxtaposition `f x y` is unchanged. Constructors are ordinary **first-class functions** (`map Some`, `val mk = Node`, `Node a`); the level-2 construction special case is gone, so a constructed value used as a juxtaposed argument or selected from needs parentheses or a chain dot (`f (Point(x=1))`, `(Point(x=1)).x` or `Point(x=1) .x`) — exactly as for any application result. Closures take a parenthesized, optionally-typed parameter list `{ (x: Int, y: String) => e }` and stay uncurried (one `FunctionN`, tuple-applied) (§4, §5.4, §7.6).
+> **Changes in v0.3 (from v0.2).** (a) **OCaml-style application & first-class constructors**: parentheses are no longer whitespace-significant — `f(x, y)` ≡ `f (x, y)` applies `f` to the *tuple* `(x, y)`, while curried juxtaposition `f x y` is unchanged. Constructors are ordinary **first-class functions** (`map Some`, `val mk = Node`, `Node a`); the level-2 construction special case is gone, so a constructed value used as a juxtaposed argument or selected from needs parentheses or a chain dot (`f (Point(x=1))`, `(Point(x=1)).x` or `Point(x=1) .x`) — exactly as for any application result. Closures take a parenthesized, optionally-typed parameter list `{ (x: Int, y: String) => e }` and stay uncurried (one `FunctionN`, tuple-applied) (§4, §5.4, §7.6). (b) **ADT payloads use parentheses, not `of`**: `type Option[A] = | Some(A) | None`, `| Node(left: Tree, value: A, right: Tree)` — positional `C(T…)` or named `C(f: T, …)`, mirroring construction and struct/class fields; the `of` keyword is removed (§5.3, §6.7).
 
 > **Changes in v0.2 (from v0.1).** (1) **Significant newlines**: statements are newline-terminated (§3.4); the `do` effect-marker and tail-`return` value-marker are removed; a block's last expression is its value. (2) **`return` is early function exit** (Java/Rust semantics, §7.13). (3) **`while`/`for` loops** join the MVP (§7.12) — `while c do e`, `for x in e do body`; `do` now introduces loop bodies. (4) **Chain selection ` .m`** (whitespace-preceded dot) replaces the `/.` operator (§4.2). (5) **Array literals** `[1, 2, 3]` (spaced `[`) and the array-argument varargs idiom join the MVP (§5.6); tight `f[T]` remains type application. (6) **Closure → SAM conversion** joins the MVP (§7.6, §8.1), unblocking `Runnable`/virtual threads. (7) A minimal **Hi standard library** `std.io` (`print`/`println`/`printf`) replaces raw libc `printf` in the examples (§10.2). (8) **`try e catch | …`** replaces `try e with` (§7.11), removing the handler-vs-struct-update collision. (9) One-field records need no trailing comma: `(x = 1)` / `(x: Int)` (§5.7). (10) Built-in operator semantics defined (§7.15); the struct GC-restriction lift path documented (§6.3). (11) **Braced arm-blocks**: `match e { | … }` and `try e catch { | … }` — braces delimit the arms, eliminating the dangling-arm ambiguity; `with` no longer introduces match arms. (12) **Unified functional update**: `base with (f = v, …)` is the single form for records, structs, and classes; the spread form `(..base, …)` and the `..` token are removed. (13) Parser-precision fixes: innermost-delimiter newline rule; guards are operator-level expressions; an empty parameter list declares one `Unit` parameter; bracket classification is token-level (§5.6 table) — `val a=[1,2,3]` is an array literal (the construction / paren-call rules introduced here were superseded by v0.3's OCaml application model, above); `given` instances with members use the braced form.
 
@@ -113,7 +113,7 @@ This table is the authoritative MVP feature boundary. "Judgment call" rows mark 
 | Lambdas | `{ x => e }`, `{ (x, y) => e }`, `{ (x: Int, y: String) => e }` | Closures only; `fun` is never used for lambdas. *Judgment call:* multi-param closures use a parenthesized list, are **uncurried** (a single N-arg function object, tuple-applied), distinct from curried `fun`. |
 | Declaration kinds | `object`, `trait`, `type` (aliases + ADTs), `struct`, `class`, `impl Trait for Type`, `extension`, `given` | Map to `Defn.Module`/`Defn.Trait`/`Defn.Class` plus `Defn.Define`s. |
 | Value vs reference types | `struct` (value), `class` (reference) | `struct`: no identity, no inheritance; fields limited to primitives, `Ptr`, and nested all-primitive/`Ptr` structs (§6.3). `class`: heap, identity, single inheritance + traits, participates in `<:`. |
-| ADTs | sealed ML-style variants `type Option[A] = \| Some of A \| None` | Lower to a reference-backed tagged **class** hierarchy (sealed base `class` + case subclasses); `match` → class-id range-test decision tree. |
+| ADTs | sealed variants `type Option[A] = \| Some(A) \| None` (paren payloads) | Lower to a reference-backed tagged **class** hierarchy (sealed base `class` + case subclasses); `match` → class-id range-test decision tree. |
 | Pattern matching | `match e { \| pat => e2 … }` (braced arm-block), exhaustiveness checking | Sealed-ADT exhaustiveness is a **compile error** (§6.7, §7). Braces delimit the arms (§5.4). |
 | Control flow | `if c then a else b` (`else` REQUIRED); `while c do e` and `for x in e do body` loops; blocks `{ stmt* }` of newline-terminated statements; `return` = early exit from the enclosing `fun` | Expression-oriented; significant newlines (§3.1, §3.4). Block value = final expression statement, else `Unit`. Loops type to `Unit`; `for` desugars to `foreach` (§7.12). |
 | Error handling | `throw expr`, `try e catch { \| Pattern => handler … }` | Exceptions only; maps to NIR unwind / `Throwable`. No `finally`. |
@@ -196,8 +196,8 @@ Statements are **newline-terminated**. A token filter between the lexer and the 
 > **Statement-termination rules (normative).**
 >
 > 1. **Suppression contexts (innermost delimiter wins).** Newline significance is decided by the *innermost* enclosing delimiter: inside `( )` and `[ ]`, newlines are plain whitespace — multi-line constructions `T(…)`, argument groups, and array literals need no continuation marks — while inside `{ }` bodies and at top level, each newline is a candidate terminator. A brace body nested within parentheses regains newline significance.
-> 2. **Continuation by previous token.** A candidate newline is suppressed when the previous token cannot end a statement: any infix or prefix operator, `,` `=` `=>` `.` `..` `:` `<:` `@`, an opening bracket, the arm bar `|`, or a keyword that requires a continuation (`if` `then` `else` `match` `try` `catch` `with` `of` `while` `for` `in` `do` `throw` `val` `var` `fun` `type` `import` `package` `using` `given` `impl` `extension` `struct` `class` `trait` `object`). (`return` *may* end a statement — a bare `return` returns `()`; its operand, if any, must start on the same line.)
-> 3. **Continuation by next token.** A candidate newline is suppressed when the next token cannot begin a statement: `then` `else` `catch` `with` `of` `in` `do` `=>` `=` `<:` `,` `)` `]` `}`, the arm bar `|`, any infix-only operator (`*` `/` `%` `^` `==` `!=` `<` `<=` `>` `>=` `&&` `||`), or a **leading `.`** (the multi-line chain form, §4.2). A line starting with `+` `-` `!` `(` `[` `{`, an identifier, a literal, or a statement-capable keyword begins a **new** statement.
+> 2. **Continuation by previous token.** A candidate newline is suppressed when the previous token cannot end a statement: any infix or prefix operator, `,` `=` `=>` `.` `..` `:` `<:` `@`, an opening bracket, the arm bar `|`, or a keyword that requires a continuation (`if` `then` `else` `match` `try` `catch` `with` `while` `for` `in` `do` `throw` `val` `var` `fun` `type` `import` `package` `using` `given` `impl` `extension` `struct` `class` `trait` `object`). (`return` *may* end a statement — a bare `return` returns `()`; its operand, if any, must start on the same line.)
+> 3. **Continuation by next token.** A candidate newline is suppressed when the next token cannot begin a statement: `then` `else` `catch` `with` `in` `do` `=>` `=` `<:` `,` `)` `]` `}`, the arm bar `|`, any infix-only operator (`*` `/` `%` `^` `==` `!=` `<` `<=` `>` `>=` `&&` `||`), or a **leading `.`** (the multi-line chain form, §4.2). A line starting with `+` `-` `!` `(` `[` `{`, an identifier, a literal, or a statement-capable keyword begins a **new** statement.
 > 4. **Application never crosses a terminator.** The arguments of a whitespace application must lie on the same logical line as the callee. For a multi-line call, parenthesize the whole call (rule 1 then suppresses the inner newlines) or pass a brace-delimited closure/block whose `{` sits on the call line (braces self-delimit and may span lines).
 
 **Examples (normative).**
@@ -234,7 +234,7 @@ run tasks
 ```
 val   var   do   return   fun   object   trait   type   struct   class   impl
 extension   given   using   with   if   then   else   match   import   package
-throw   try   catch   of   while   for   in   true   false
+throw   try   catch   while   for   in   true   false
 ```
 
 - `val`/`var` — immutable / mutable local binding; `fun` — function declarations. Statements are newline-terminated (§3.4) and any expression may stand as a statement.
@@ -246,7 +246,6 @@ throw   try   catch   of   while   for   in   true   false
 - `given`/`using` — contextual instances and contextual parameters.
 - `with` — functional update `base with (...)` (records/structs/classes, §6.6) and parent lists (`<: A with B`). `match` arms live in a braced arm-block (§5.4), not behind `with`.
 - `throw`/`try`/`catch` — the only error-handling forms: `try e catch { | P => h … }` (§7.11).
-- `of` — ADT variant payload.
 - `true`/`false` — boolean literals lexed as keywords.
 
 > **Note.** `new` is **not** a keyword. Construction is always `T(...)`; there is no `new`.
@@ -504,13 +503,12 @@ A `type` head covers both **aliases** and **ML-style sealed variant ADTs**, disa
 type_decl       ::= type_alias_decl | variant_decl
 type_alias_decl ::= "type" UPPER_ID type_params? "=" type
 variant_decl    ::= "type" UPPER_ID type_params? "=" ( "|" variant_case )+
-variant_case    ::= UPPER_ID ( "of" variant_payload )?
-variant_payload ::= type                                   // bare-type payload: 'Some of A'
-                 |  "(" sepBy1(named_field, ",") ")"        // record-style: 'Node of (l: Tree, r: Tree)'
-named_field     ::= LOWER_ID ":" type
+variant_case    ::= UPPER_ID variant_payload?
+variant_payload ::= "(" sepBy1(payload_elem, ",") ")"      // 'Some(A)'  /  'Node(left: Tree, value: A)'
+payload_elem    ::= ( LOWER_ID ":" )? type                 // positional 'Tree' or named 'left: Tree'
 ```
 
-**Payload construction/matching (normative).** A bare-type payload `C of T` is constructed and matched **positionally** with a single implicit synthetic field name `_1`: construct `C(e)`, match `C(p)`. A record-style payload `C of (f: T, …)` uses **named** construction/patterns: `C(f = e)`, `C(f = p)`. Variants lower to a reference-backed tagged class hierarchy (§6.7, §8.3).
+**Payload construction/matching (normative).** A **positional** payload `C(T1, …, Tn)` is constructed and matched positionally with synthetic field names `_1..._n`: construct `C(e1, …)`, match `C(p1, …)` (a single field `Some(A)` uses `_1`). A **named** payload `C(f: T, …)` uses named construction/patterns: `C(f = e, …)`, `C(f = p, …)`. Mixing positional and named within one payload is a compile error. Since `C` is a first-class constructor (§7.7), construction is ordinary application of `C`. Variants lower to a reference-backed tagged class hierarchy (§6.7, §8.3).
 
 #### Struct (value) and class (reference)
 
@@ -920,12 +918,12 @@ for each gi:  Γ ⊢ vi ⇐ type-of(gi in R)
 ### 6.7 ADTs
 
 ```hi
-type Option[A] = | Some of A | None
-type Tree[A] = | Leaf | Node of (left: Tree[A], value: A, right: Tree[A])
+type Option[A] = | Some(A) | None
+type Tree[A] = | Leaf | Node(left: Tree[A], value: A, right: Tree[A])
 ```
 
-- **Lowering:** a sealed base `class` (the type name) plus one case subclass per variant. Each case carries its `of`-payload as fields. A **nullary variant (`None`, `Leaf`) lowers to a singleton module instance** (§8.3). ADTs are reference types (may hold managed refs; may not appear inside a `struct`).
-- **Payload convention (normative):** bare-type payload `C of T` → positional construction/match `C(e)` / `C(p)`, with implicit field `_1`. Record-style payload `C of (f: T, …)` → named `C(f = e)` / `C(f = p)`.
+- **Lowering:** a sealed base `class` (the type name) plus one case subclass per variant. Each case carries its payload as fields. A **nullary variant (`None`, `Leaf`) lowers to a singleton module instance** (§8.3). ADTs are reference types (may hold managed refs; may not appear inside a `struct`).
+- **Payload convention (normative):** positional payload `C(T, …)` → positional construction/match `C(e, …)` / `C(p, …)`, with implicit fields `_1..._n`. Named payload `C(f: T, …)` → named `C(f = e, …)` / `C(f = p, …)`.
 - **`match` lowering:** a class-id range-test decision tree (§8.3), not a tag field.
 - **Exhaustiveness (compile error).** Because the base is sealed, a `match` over an ADT that does not cover every variant (with no catch-all `_`/binder arm) is a **compile error**, as is a redundant/unreachable arm. (Runtime `MatchError` arises only for genuinely non-sealed/open scrutinees — see §7.)
 - **Generics** are checked nominally and erased (§6.10).
@@ -1086,7 +1084,7 @@ Canonical (and only) form: `match e { | pat => e2 | … }` — a braced **arm-bl
 A bare lowercase identifier is always a **binder**. A name may not be bound twice in one pattern. **Sealed-ADT exhaustiveness is a compile error** if any variant is uncovered with no catch-all (§6.7). A genuinely **non-sealed/open** scrutinee (e.g. a `class`/trait match without a catch-all) may fall through at runtime to throw `MatchError` (a `Throwable` from the reused runtime). ADT matches lower to a class-id range-test decision tree (§8.3); literal patterns to `Inst.If`/`Op.Comp`.
 
 ```hi
-type Shape = | Circle of Double | Rect of (w: Double, h: Double)
+type Shape = | Circle(Double) | Rect(w: Double, h: Double)
 
 fun area (s: Shape): Double =
   match s {
@@ -1320,7 +1318,7 @@ Instantiation `C(1, n)` → `Op.Classalloc(C, zone = None)` then a ctor `Op.Call
 
 ### 8.3 ADTs → sealed `Defn.Class` hierarchy; `match` → class-id range-test decision tree
 
-A sealed ADT `type Option[A] = | Some of A | None` lowers to:
+A sealed ADT `type Option[A] = | Some(A) | None` lowers to:
 
 - A sealed/abstract base `Defn.Class(Attrs.None, Option, parent = Some(Rt.Object.name), traits = Nil)` (sealed marked via `Attrs` so the linker knows the closed set). **No synthetic `$tag` field.**
 - One subclass per variant: `Defn.Class(... Option$Some, parent = Some(Option) ...)` with a payload field per ctor argument (`Some`'s `_1: A` erased to `Rt.Object`, §8.9) and a ctor; `Defn.Class(... Option$None ...)` for the nullary case.
@@ -1478,7 +1476,7 @@ import std.io.printf
 
 type Tree[A] =
   | Leaf
-  | Node of (left: Tree[A], value: A, right: Tree[A])
+  | Node(left: Tree[A], value: A, right: Tree[A])
 
 fun insert (t: Tree[Int]) (x: Int): Tree[Int] =
   match t {
@@ -1623,11 +1621,11 @@ package examples.eval
 import std.io.printf
 
 type Expr =
-  | Num of Double
-  | Add of (l: Expr, r: Expr)
-  | Sub of (l: Expr, r: Expr)
-  | Mul of (l: Expr, r: Expr)
-  | Div of (l: Expr, r: Expr)
+  | Num(Double)
+  | Add(l: Expr, r: Expr)
+  | Sub(l: Expr, r: Expr)
+  | Mul(l: Expr, r: Expr)
+  | Div(l: Expr, r: Expr)
 
 // Exceptions only (no effect handlers). A managed-ref-carrying error must be a class.
 class DivByZero (msg: String) <: Throwable(msg)
