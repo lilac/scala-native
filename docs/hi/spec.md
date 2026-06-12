@@ -24,7 +24,28 @@
 
 ## 1. Overview & Design Principles
 
-### 1.1 What Hi Is
+### 1.1 Why Hi Exists — Motivation & Niche
+
+Hi targets a specific, under-served point in the language-design space: **native ahead-of-time compilation with a garbage collector**. Most languages sit in a different quadrant:
+
+| | Manual / no GC | Garbage-collected |
+|---|---|---|
+| **Native AOT binary** | C, C++, Rust, Swift, Zig | **Hi**, Go, D, Crystal, Nim |
+| **Managed VM / JIT** | — | Java, Scala, Kotlin, C# |
+
+The reasoning behind that target:
+
+- **You rarely need C-level performance, and rarely want to pay for it.** For server-class software — microservices, CLIs, glue, network daemons — Rust/Swift-grade manual memory management (or borrow-checking) is overhead the problem does not require. A garbage collector is the right default; the programmer should not be managing memory by hand. (Rust and Swift already serve the *no-GC, C-level-perf* niche well; Hi does not compete there.)
+- **But you also don't want a managed VM.** Java/Scala/Kotlin/C# give you GC and a rich type system at the cost of shipping and warming a runtime VM. In a containerized world (Docker/Kubernetes) the deployment *environment* is already provided by the image, so the historical "compile once, run on any VM" benefit is largely moot — what you want instead is a single self-contained native binary with fast startup and a flat memory profile.
+- **So: GC, but compiled straight to a native executable.** This is broadly Go's quadrant. Hi aims to keep Go's operational story (one native binary, no VM, simple ops) while being **more expressive and elegant** than Go: sum types with exhaustive matching, a real generic / trait / typeclass system, expression-orientation, structural records, and contextual abstraction.
+
+**Concurrency without colored functions.** Hi reuses Scala Native's Loom-style **virtual threads**. Concurrent code is written in a direct, blocking style — `Thread.ofVirtual.start { => work () }` — with no `async`/`await` split, and therefore no [two-color-function](https://journal.stuffwithstuff.com/2015/02/01/what-color-is-your-function/) problem: any function may block, and the runtime multiplexes virtual threads onto OS threads. This is the goroutine ergonomic, delivered by backend reuse rather than a bespoke runtime.
+
+**Lineage, briefly.** Hi takes GC + native AOT + lightweight green threads from **Go**, a rich GC'd type system and ecosystem reach from **Java**, and expressiveness — ADTs, traits/givens, expression-orientation, lightweight application — from **Scala/OCaml**. It is built as a frontend over Scala Native precisely so it can inherit a production native + GC + virtual-thread backend instead of reimplementing one (§1.2).
+
+**Who it is *not* for (non-goals).** Hi is **not** chasing Go's deliberately-minimal, "boring syntax" audience, and it is **not** competing with Rust/C/C++ on zero-overhead or no-GC workloads. Its closest reference point is **GraalVM native-image + Loom** (a GC'd, AOT-compiled, virtual-threaded JVM stack); Hi pursues the same operational profile from a smaller, expression-oriented, FP-leaning surface with no VM heritage. The intended audience is programmers who want OCaml/Scala-style expressiveness but with a native binary and effortless concurrency.
+
+### 1.2 What Hi Is
 
 **Hi** is a statically-typed, expression-oriented, natively-compiled programming language. It is implemented as a **new compiler frontend** that emits Scala Native's **NIR** (Native Intermediate Representation) and reuses the **entire Scala Native backend** unchanged: the closed-world linker / reachability analysis, the Interflow optimizer, the LLVM code generator, the Immix/Commix garbage collector, the C/native runtime, and the concurrency machinery (OS threads plus Loom-style virtual threads).
 
@@ -32,7 +53,7 @@ Hi is **not** Scala, and it is **not** a fork of Scala Native. It has its own su
 
 The architectural consequence is leverage: Hi inherits a production-grade, multi-platform native backend (memory management, exception unwinding, reflection metadata/RTTI, threading, FFI) for free. Hi's authors build only a frontend and a *lowering*; they do not build a runtime, an optimizer, or a code generator.
 
-### 1.2 Language Character
+### 1.3 Language Character
 
 Hi's surface synthesizes ideas from several languages, all reconciled under static typing and native compilation:
 
@@ -42,14 +63,14 @@ Hi's surface synthesizes ideas from several languages, all reconciled under stat
 - **Swift-style value/reference split**: `struct` is a copied-by-value aggregate with no identity and no inheritance; `class` is a heap-allocated reference type with identity, single inheritance, and trait implementation.
 - **TypeScript-like structural records / named tuples**: `(x = 1, y = 2)` literals and `(x: Int, y: Int)` structural types whose identity is the field-name-and-type set (order-independent), plus nominal `struct`/`class` construction `Point(x = 1, y = 2)`.
 
-### 1.3 The Two Arrow Tokens (governing convention)
+### 1.4 The Two Arrow Tokens (governing convention)
 
 Two arrow tokens are used and never confused. This rule governs the entire document:
 
 - **`=>`** introduces a **closure body** and a **match/try arm body**.
 - **`->`** is the **function-type constructor** only (`A -> B`, right-associative). It never appears in term position.
 
-### 1.4 Design Principles
+### 1.5 Design Principles
 
 The following principles are authoritative and shape every later section.
 
@@ -67,11 +88,13 @@ The following principles are authoritative and shape every later section.
 
 7. **Small, orthogonal surface.** Each construct has one clear meaning and one lowering. Operators with subtle interactions (tight `.` vs chain ` .m` vs whitespace application; functional update vs intersection) are given a single precise definition each, and ambiguities are resolved by explicit precedence rather than heuristics.
 
-8. **Erase frontend-only types.** Union (`A | B`) and intersection (`A & B`) types, like Scala 3, exist only in the frontend and are erased at the NIR level; in the MVP they are restricted to reference types.
+8. **Deterministic, bounded-lookahead parseability.** The grammar is designed to be parsed by a recursive-descent / Pratt parser with a Scala-3-style newline filter and a fixed set of *bounded* lookahead gates (closure-vs-block, the leading-`(` forms, type-context `(`, `with`-continuations) — **no general backtracking and no type-directed parsing**. Whitespace-sensitive token classification (prefix-vs-infix `-`, tight-`.` vs chain-` .m`, tight-`[`/`(` vs spaced) is decided locally by the lexer with one token of lookbehind, never by parser feedback (§4, §5.6). Where two readings would otherwise compete, the surface is shaped so the ambiguity cannot arise (e.g. braced `match`/`catch` arm-blocks close the dangling-arm question; forbidding paren-calls turns `f(x)` into a diagnostic rather than a silent one-tuple application).
 
-9. **Defer rather than approximate.** Features that cannot be lowered safely or completely with the current backend (row polymorphism, algebraic effects, value-backed enums, value-structs holding managed references, higher-kinded types, macros, etc.) are explicitly out of scope and named as such.
+9. **Erase frontend-only types.** Union (`A | B`) and intersection (`A & B`) types, like Scala 3, exist only in the frontend and are erased at the NIR level; in the MVP they are restricted to reference types.
 
-10. **Always format-version-matched.** Because Hi lives in-repo and depends on `tools`/`nir`, the emitted NIR is guaranteed binary-compatible with the backend it links against; there is no separate NIR version-negotiation surface.
+10. **Defer rather than approximate.** Features that cannot be lowered safely or completely with the current backend (row polymorphism, algebraic effects, value-backed enums, value-structs holding managed references, higher-kinded types, macros, etc.) are explicitly out of scope and named as such.
+
+11. **Always format-version-matched.** Because Hi lives in-repo and depends on `tools`/`nir`, the emitted NIR is guaranteed binary-compatible with the backend it links against; there is no separate NIR version-negotiation surface.
 
 ---
 
