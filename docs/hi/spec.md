@@ -2,7 +2,7 @@
 
 > A statically-typed, expression-oriented, native-compiled language implemented as a new frontend that emits Scala Native's NIR and reuses the entire Scala Native backend.
 
-> **Changes in v0.3 (from v0.2).** (a) **OCaml-style application & first-class constructors**: parentheses are no longer whitespace-significant — `f(x, y)` ≡ `f (x, y)` applies `f` to the *tuple* `(x, y)`, while curried juxtaposition `f x y` is unchanged. Constructors are ordinary **first-class functions** (`map Some`, `val mk = Node`, `Node a`); the level-2 construction special case is gone, so a constructed value used as a juxtaposed argument or selected from needs parentheses or a chain dot (`f (Point(x=1))`, `(Point(x=1)).x` or `Point(x=1) .x`) — exactly as for any application result. Closures take a parenthesized, optionally-typed parameter list `{ (x: Int, y: String) => e }` and stay uncurried (one `FunctionN`, tuple-applied) (§4, §5.4, §7.6). (b) **ADT payloads use parentheses, not `of`**: `type Option[A] = | Some(A) | None`, `| Node(left: Tree, value: A, right: Tree)` — positional `C(T…)` or named `C(f: T, …)`, mirroring construction and struct/class fields; the `of` keyword is removed (§5.3, §6.7). (c) **Postfix `match`**: the scrutinee comes first — `e match { | … }` (Scala-style), a lowest-precedence postfix. It reads naturally after method chains (`xs.map f match { … }`) and removes the cramped adjacent-brace case when the scrutinee ends in a callback. `match` becomes a continuation keyword (a line-leading `match` joins the previous line); `try e catch { … }` is unchanged (§4.1, §5.4, §7.5).
+> **Changes in v0.3 (from v0.2).** (a) **OCaml-style application & first-class constructors**: parentheses are no longer whitespace-significant — `f(x, y)` ≡ `f (x, y)` applies `f` to the *tuple* `(x, y)`, while curried juxtaposition `f x y` is unchanged. Constructors are ordinary **first-class functions** (`map Some`, `val mk = Node`, `Node a`); the level-2 construction special case is gone, so a constructed value used as a juxtaposed argument or selected from needs parentheses or a chain dot (`f (Point(x=1))`, `(Point(x=1)).x` or `Point(x=1) .x`) — exactly as for any application result. Closures take a parenthesized, optionally-typed parameter list `{ (x: Int, y: String) => e }` and stay uncurried (one `FunctionN`, tuple-applied) (§4, §5.4, §7.6). (b) **ADT payloads use parentheses, not `of`**: `type Option[A] = | Some(A) | None`, `| Node(left: Tree, value: A, right: Tree)` — positional `C(T…)` or named `C(f: T, …)`, mirroring construction and struct/class fields; the `of` keyword is removed (§5.3, §6.7). (c) **Postfix `match`**: the scrutinee comes first — `e match { | … }` (Scala-style), a lowest-precedence postfix. It reads naturally after method chains (`xs.map f match { … }`) and removes the cramped adjacent-brace case when the scrutinee ends in a callback. `match` becomes a continuation keyword (a line-leading `match` joins the previous line); `try e catch { … }` is unchanged (§4.1, §5.4, §7.5). (d) **Comma-separated parent lists**: inheritance keeps `<:` (consistent with the `[A <: Bound]` subtype-bound notation; `>:` stays reserved for a future lower bound) but lists parents with commas instead of repeated `with` — `class Dog (name: String) <: Animal(name), Runnable, Comparable[Dog]`. `with` is now reserved for functional update only (§5.3).
 
 > **Changes in v0.2 (from v0.1).** (1) **Significant newlines**: statements are newline-terminated (§3.4); the `do` effect-marker and tail-`return` value-marker are removed; a block's last expression is its value. (2) **`return` is early function exit** (Java/Rust semantics, §7.13). (3) **`while`/`for` loops** join the MVP (§7.12) — `while c do e`, `for x in e do body`; `do` now introduces loop bodies. (4) **Chain selection ` .m`** (whitespace-preceded dot) replaces the `/.` operator (§4.2). (5) **Array literals** `[1, 2, 3]` (spaced `[`) and the array-argument varargs idiom join the MVP (§5.6); tight `f[T]` remains type application. (6) **Closure → SAM conversion** joins the MVP (§7.6, §8.1), unblocking `Runnable`/virtual threads. (7) A minimal **Hi standard library** `std.io` (`print`/`println`/`printf`) replaces raw libc `printf` in the examples (§10.2). (8) **`try e catch | …`** replaces `try e with` (§7.11), removing the handler-vs-struct-update collision. (9) One-field records need no trailing comma: `(x = 1)` / `(x: Int)` (§5.7). (10) Built-in operator semantics defined (§7.15); the struct GC-restriction lift path documented (§6.3). (11) **Braced arm-blocks**: `match e { | … }` and `try e catch { | … }` — braces delimit the arms, eliminating the dangling-arm ambiguity; `with` no longer introduces match arms. (12) **Unified functional update**: `base with (f = v, …)` is the single form for records, structs, and classes; the spread form `(..base, …)` and the `..` token are removed. (13) Parser-precision fixes: innermost-delimiter newline rule; guards are operator-level expressions; an empty parameter list declares one `Unit` parameter; bracket classification is token-level (§5.6 table) — `val a=[1,2,3]` is an array literal (the construction / paren-call rules introduced here were superseded by v0.3's OCaml application model, above); `given` instances with members use the braced form.
 
@@ -244,7 +244,7 @@ throw   try   catch   while   for   in   true   false
 - `impl` — `impl Trait for Type { ... }`.
 - `extension` — `extension (x: T) { ... }`.
 - `given`/`using` — contextual instances and contextual parameters.
-- `with` — functional update `base with (...)` (records/structs/classes, §6.6) and parent lists (`<: A with B`). `match` arms live in a braced arm-block (§5.4), not behind `with`.
+- `with` — functional update `base with (...)` only (records/structs/classes, §6.6). Parent lists use commas (`<: A, B`, §5.3); `match` arms live in a braced arm-block (§5.4). Neither uses `with`.
 - `throw`/`try`/`catch` — the only error-handling forms: `try e catch { | P => h … }` (§7.11).
 - `true`/`false` — boolean literals lexed as keywords.
 
@@ -521,22 +521,23 @@ ctor_params ::= "(" sepBy(field_param, ",") ")"
 field_param ::= ( "val" | "var" )? LOWER_ID ":" type ( "=" expr )?
              // fields are 'val' by default; 'var' makes them mutable
 
-class_parents ::= "<:" parent ("with" type)*
-parent        ::= type                                              // bare parent type (e.g. a trait)
-               |  UPPER_ID type_args? "(" sepBy(ctor_arg, ",") ")"  // parent CLASS with super-ctor args
+class_parents ::= "<:" sepBy1(parent, ",")                          // comma-separated; '<:' kept (subtype notation)
+parent        ::= type                                              // trait, or argument-less class/trait parent
+               |  UPPER_ID type_args? "(" sepBy(super_arg, ",") ")" // parent CLASS with super-ctor args
+super_arg     ::= named_arg | expr                                  // named or positional, as in construction
 
 struct_body ::= "{" items_block "}"                        // methods, vals; NO inheritance
 class_body  ::= "{" items_block "}"
 ```
 
 - `parent` admits a **super-constructor call** `UPPER_ID(...args)`: `class Dog (name: String) <: Animal(name)` invokes `Animal`'s constructor with `name` (§8.2 specifies where the parent-ctor args are supplied). A bare `type` parent (no args) is for traits or for argument-less class parents.
-- **Locked constraints (enforced in typing, not grammar):** a `struct` has no `class_parents` (no inheritance); a `struct` field's declared (unboxed) type must be a primitive, `Ptr`, or another all-primitive/`Ptr` struct — a managed reference (incl. a box class such as `java.lang.Integer` or `scala.scalanative.unsafe.Ptr`) is a compile error (§6.3). A `class` allows exactly one `parent` (class or trait) plus any number of `with`-listed traits.
+- **Locked constraints (enforced in typing, not grammar):** a `struct` has no `class_parents` (no inheritance); a `struct` field's declared (unboxed) type must be a primitive, `Ptr`, or another all-primitive/`Ptr` struct — a managed reference (incl. a box class such as `java.lang.Integer` or `scala.scalanative.unsafe.Ptr`) is a compile error (§6.3). A `class` allows exactly one class parent (with optional super-ctor args) plus any number of comma-listed traits — `class Dog (name: String) <: Animal(name), Runnable, Comparable[Dog]`. (Parent-list commas are top-level; commas inside a super-call `Animal(a, b)` sit at a deeper paren depth, so the two never collide.)
 
 #### Trait, impl, extension, given, object
 
 ```
 trait_decl    ::= "trait" UPPER_ID type_params? trait_parents? "{" items_block "}"
-trait_parents ::= "<:" sepBy1(type, "with")
+trait_parents ::= "<:" sepBy1(type, ",")
 
 impl_decl     ::= "impl" type_params? type "for" type "{" items_block "}"
 
@@ -547,7 +548,7 @@ given_decl    ::= "given" given_head? type ( "=" expr | "{" items_block "}" )
 given_head    ::= ( LOWER_ID )? type_params? ( "(" sepBy(param, ",") ")" )? ":"
 
 object_decl   ::= "object" UPPER_ID object_parents? "{" items_block "}"
-object_parents::= "<:" type ("with" type)*
+object_parents::= "<:" sepBy1(type, ",")
 ```
 
 `given_head` is detected by a bounded scan: if a depth-0 `:` occurs before the first `=` or `{`, the head (optional name, type params, params) is present; otherwise the `given` begins directly with the instance type. An instance **with members** uses the braced form `given T { items }`; `given T = expr` binds an existing value as the instance.
@@ -675,7 +676,7 @@ update_expr ::= postfix_expr "with" "(" sepBy1(named_arg, ",") ")"   // 'base wi
                                                                       // ONE form: records, structs, classes
 ```
 
-**Construction is application (v0.3).** There is no dedicated `construct` production. A type name `T` in value position is its **constructor function**; `T(args)` and `T (args)` are ordinary applications (§5.5) that the elaborator lowers to allocation when the head statically resolves to a constructor (§8.2). Positional `T(e1, …, en)` applies the constructor to the tuple of fields (in declaration order); named `T(f = e, …)` applies it to the field record. Used bare, `T` is a first-class value: `xs.map Some`, `val mk = Node`, `Node a` (where `a`'s static type is the payload). `ctor_arg` is therefore just the `paren_or_tuple` / `named_tuple_lit` argument — no special grammar.
+**Construction is application (v0.3).** There is no dedicated `construct` production. A type name `T` in value position is its **constructor function**; `T(args)` and `T (args)` are ordinary applications (§5.5) that the elaborator lowers to allocation when the head statically resolves to a constructor (§8.2). Positional `T(e1, …, en)` applies the constructor to the tuple of fields (in declaration order); named `T(f = e, …)` applies it to the field record. Used bare, `T` is a first-class value: `xs.map Some`, `val mk = Node`, `Node a` (where `a`'s static type is the payload). The construction argument is therefore just an ordinary `paren_or_tuple` / `named_tuple_lit` — no special grammar. (Parent super-calls in a `<:` clause keep an explicit arg list, `super_arg`, §5.3.)
 
 `update_expr` attaches at the postfix level inside the larger expression machinery; the parser admits `base with (…)` wherever a `postfix_expr` is followed by the `with` keyword and a `( named_arg, … )` group — and since `match` arms moved into arm-blocks, an expression-position `with` is **always** an update. (The v0.1 spread form `(..base, …)` and its `..` token are removed; `with` is the single update spelling for records, structs, and classes alike.)
 
@@ -1172,7 +1173,7 @@ val r2 = r with (x = 10, z = 30)   // (x = 10, y = 2, z = 30)
 
 The MVP has no algebraic effects; error handling is exceptions only.
 
-> **Judgment call (`catch` + braced arm-block).** v0.1 spelled the handler `try e with | …`; v0.2 uses **`catch`** followed by a braced arm-block (§5.4), like `match`. Besides familiarity (Scala/Java), this removes a real parse collision — `try base with (x = 1) …` needs no lookahead to distinguish a handler from a postfix update — and the braces make handler ownership explicit when `try`s nest inside `match` arms (and vice versa). `with` is reserved for functional update and parent lists.
+> **Judgment call (`catch` + braced arm-block).** v0.1 spelled the handler `try e with | …`; v0.2 uses **`catch`** followed by a braced arm-block (§5.4), like `match`. Besides familiarity (Scala/Java), this removes a real parse collision — `try base with (x = 1) …` needs no lookahead to distinguish a handler from a postfix update — and the braces make handler ownership explicit when `try`s nest inside `match` arms (and vice versa). `with` is reserved for functional update only (parent lists use commas, §5.3).
 
 **`throw e`.** `e` must statically be `<: Throwable`. `throw e` raises the value, unwinding to the nearest dynamically-enclosing handler. As an expression it has type `Nothing` (assignable anywhere). Construction uses `T(...)` (no `new`): `throw IllegalArgumentException("negative")`. Lowering: `Inst.Throw(value, unwind)`.
 
