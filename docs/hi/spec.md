@@ -2,7 +2,7 @@
 
 > A statically-typed, expression-oriented, native-compiled language implemented as a new frontend that emits Scala Native's NIR and reuses the entire Scala Native backend.
 
-> **Changes in v0.3 (from v0.2).** (a) **OCaml-style application & first-class constructors**: parentheses are no longer whitespace-significant — `f(x, y)` ≡ `f (x, y)` applies `f` to the *tuple* `(x, y)`, while curried juxtaposition `f x y` is unchanged. Constructors are ordinary **first-class functions** (`map Some`, `val mk = Node`, `Node a`); the level-2 construction special case is gone, so a constructed value used as a juxtaposed argument or selected from needs parentheses or a chain dot (`f (Point(x=1))`, `(Point(x=1)).x` or `Point(x=1) .x`) — exactly as for any application result. Closures take a parenthesized, optionally-typed parameter list `{ (x: Int, y: String) => e }` and stay uncurried (one `FunctionN`, tuple-applied) (§4, §5.4, §7.6). (b) **ADT payloads use parentheses, not `of`**: `type Option[A] = | Some(A) | None`, `| Node(left: Tree, value: A, right: Tree)` — positional `C(T…)` or named `C(f: T, …)`, mirroring construction and struct/class fields; the `of` keyword is removed (§5.3, §6.7).
+> **Changes in v0.3 (from v0.2).** (a) **OCaml-style application & first-class constructors**: parentheses are no longer whitespace-significant — `f(x, y)` ≡ `f (x, y)` applies `f` to the *tuple* `(x, y)`, while curried juxtaposition `f x y` is unchanged. Constructors are ordinary **first-class functions** (`map Some`, `val mk = Node`, `Node a`); the level-2 construction special case is gone, so a constructed value used as a juxtaposed argument or selected from needs parentheses or a chain dot (`f (Point(x=1))`, `(Point(x=1)).x` or `Point(x=1) .x`) — exactly as for any application result. Closures take a parenthesized, optionally-typed parameter list `{ (x: Int, y: String) => e }` and stay uncurried (one `FunctionN`, tuple-applied) (§4, §5.4, §7.6). (b) **ADT payloads use parentheses, not `of`**: `type Option[A] = | Some(A) | None`, `| Node(left: Tree, value: A, right: Tree)` — positional `C(T…)` or named `C(f: T, …)`, mirroring construction and struct/class fields; the `of` keyword is removed (§5.3, §6.7). (c) **Postfix `match`**: the scrutinee comes first — `e match { | … }` (Scala-style), a lowest-precedence postfix. It reads naturally after method chains (`xs.map f match { … }`) and removes the cramped adjacent-brace case when the scrutinee ends in a callback. `match` becomes a continuation keyword (a line-leading `match` joins the previous line); `try e catch { … }` is unchanged (§4.1, §5.4, §7.5).
 
 > **Changes in v0.2 (from v0.1).** (1) **Significant newlines**: statements are newline-terminated (§3.4); the `do` effect-marker and tail-`return` value-marker are removed; a block's last expression is its value. (2) **`return` is early function exit** (Java/Rust semantics, §7.13). (3) **`while`/`for` loops** join the MVP (§7.12) — `while c do e`, `for x in e do body`; `do` now introduces loop bodies. (4) **Chain selection ` .m`** (whitespace-preceded dot) replaces the `/.` operator (§4.2). (5) **Array literals** `[1, 2, 3]` (spaced `[`) and the array-argument varargs idiom join the MVP (§5.6); tight `f[T]` remains type application. (6) **Closure → SAM conversion** joins the MVP (§7.6, §8.1), unblocking `Runnable`/virtual threads. (7) A minimal **Hi standard library** `std.io` (`print`/`println`/`printf`) replaces raw libc `printf` in the examples (§10.2). (8) **`try e catch | …`** replaces `try e with` (§7.11), removing the handler-vs-struct-update collision. (9) One-field records need no trailing comma: `(x = 1)` / `(x: Int)` (§5.7). (10) Built-in operator semantics defined (§7.15); the struct GC-restriction lift path documented (§6.3). (11) **Braced arm-blocks**: `match e { | … }` and `try e catch { | … }` — braces delimit the arms, eliminating the dangling-arm ambiguity; `with` no longer introduces match arms. (12) **Unified functional update**: `base with (f = v, …)` is the single form for records, structs, and classes; the spread form `(..base, …)` and the `..` token are removed. (13) Parser-precision fixes: innermost-delimiter newline rule; guards are operator-level expressions; an empty parameter list declares one `Unit` parameter; bracket classification is token-level (§5.6 table) — `val a=[1,2,3]` is an array literal (the construction / paren-call rules introduced here were superseded by v0.3's OCaml application model, above); `given` instances with members use the braced form.
 
@@ -114,7 +114,7 @@ This table is the authoritative MVP feature boundary. "Judgment call" rows mark 
 | Declaration kinds | `object`, `trait`, `type` (aliases + ADTs), `struct`, `class`, `impl Trait for Type`, `extension`, `given` | Map to `Defn.Module`/`Defn.Trait`/`Defn.Class` plus `Defn.Define`s. |
 | Value vs reference types | `struct` (value), `class` (reference) | `struct`: no identity, no inheritance; fields limited to primitives, `Ptr`, and nested all-primitive/`Ptr` structs (§6.3). `class`: heap, identity, single inheritance + traits, participates in `<:`. |
 | ADTs | sealed variants `type Option[A] = \| Some(A) \| None` (paren payloads) | Lower to a reference-backed tagged **class** hierarchy (sealed base `class` + case subclasses); `match` → class-id range-test decision tree. |
-| Pattern matching | `match e { \| pat => e2 … }` (braced arm-block), exhaustiveness checking | Sealed-ADT exhaustiveness is a **compile error** (§6.7, §7). Braces delimit the arms (§5.4). |
+| Pattern matching | `e match { \| pat => e2 … }` (postfix, braced arm-block), exhaustiveness checking | Sealed-ADT exhaustiveness is a **compile error** (§6.7, §7). Postfix `match`; braces delimit the arms (§5.4). |
 | Control flow | `if c then a else b` (`else` REQUIRED); `while c do e` and `for x in e do body` loops; blocks `{ stmt* }` of newline-terminated statements; `return` = early exit from the enclosing `fun` | Expression-oriented; significant newlines (§3.1, §3.4). Block value = final expression statement, else `Unit`. Loops type to `Unit`; `for` desugars to `foreach` (§7.12). |
 | Error handling | `throw expr`, `try e catch { \| Pattern => handler … }` | Exceptions only; maps to NIR unwind / `Throwable`. No `finally`. |
 | Tuples & records | tuples `(1, 2)`; named tuples `(x = 1, y = 2)`, one-field `(x = 1)`; structural record TYPES `(x: Int, y: Int)`, one-field `(x: Int)` | Structural identity = field-name set + types, order-independent, deterministic canonical layout. Trailing commas permitted, never required (§5.7). |
@@ -196,8 +196,8 @@ Statements are **newline-terminated**. A token filter between the lexer and the 
 > **Statement-termination rules (normative).**
 >
 > 1. **Suppression contexts (innermost delimiter wins).** Newline significance is decided by the *innermost* enclosing delimiter: inside `( )` and `[ ]`, newlines are plain whitespace — multi-line constructions `T(…)`, argument groups, and array literals need no continuation marks — while inside `{ }` bodies and at top level, each newline is a candidate terminator. A brace body nested within parentheses regains newline significance.
-> 2. **Continuation by previous token.** A candidate newline is suppressed when the previous token cannot end a statement: any infix or prefix operator, `,` `=` `=>` `.` `..` `:` `<:` `@`, an opening bracket, the arm bar `|`, or a keyword that requires a continuation (`if` `then` `else` `match` `try` `catch` `with` `while` `for` `in` `do` `throw` `val` `var` `fun` `type` `import` `package` `using` `given` `impl` `extension` `struct` `class` `trait` `object`). (`return` *may* end a statement — a bare `return` returns `()`; its operand, if any, must start on the same line.)
-> 3. **Continuation by next token.** A candidate newline is suppressed when the next token cannot begin a statement: `then` `else` `catch` `with` `in` `do` `=>` `=` `<:` `,` `)` `]` `}`, the arm bar `|`, any infix-only operator (`*` `/` `%` `^` `==` `!=` `<` `<=` `>` `>=` `&&` `||`), or a **leading `.`** (the multi-line chain form, §4.2). A line starting with `+` `-` `!` `(` `[` `{`, an identifier, a literal, or a statement-capable keyword begins a **new** statement.
+> 2. **Continuation by previous token.** A candidate newline is suppressed when the previous token cannot end a statement: any infix or prefix operator, `,` `=` `=>` `.` `..` `:` `<:` `@`, an opening bracket, the arm bar `|`, or a keyword that requires a continuation (`if` `then` `else` `try` `catch` `with` `while` `for` `in` `do` `throw` `val` `var` `fun` `type` `import` `package` `using` `given` `impl` `extension` `struct` `class` `trait` `object`). (`return` *may* end a statement — a bare `return` returns `()`; its operand, if any, must start on the same line.)
+> 3. **Continuation by next token.** A candidate newline is suppressed when the next token cannot begin a statement: `then` `else` `match` `catch` `with` `in` `do` `=>` `=` `<:` `,` `)` `]` `}`, the arm bar `|`, any infix-only operator (`*` `/` `%` `^` `==` `!=` `<` `<=` `>` `>=` `&&` `||`), or a **leading `.`** (the multi-line chain form, §4.2). A line starting with `+` `-` `!` `(` `[` `{`, an identifier, a literal, or a statement-capable keyword begins a **new** statement.
 > 4. **Application never crosses a terminator.** The arguments of a whitespace application must lie on the same logical line as the callee. For a multi-line call, parenthesize the whole call (rule 1 then suppresses the inner newlines) or pass a brace-delimited closure/block whose `{` sits on the call line (braces self-delimit and may span lines).
 
 **Examples (normative).**
@@ -311,7 +311,7 @@ This is **the** precedence table (the grammar of §5 encodes exactly this; where
 | 9 | **Equality** | `==` `!=` | left (non-chaining) |
 | 10 | **Logical and** | `&&` | left (short-circuit) |
 | 11 | **Logical or** | `\|\|` | left (short-circuit) |
-| 12 | **Control / leaf forms (LOOSEST)** | `if … then … else …`, `match e { … }`, `throw e`, `try e catch { … }`, `while … do …`, `for … in … do …`, `return e?` | n/a (unbounded; must be parenthesized to be an operand of 1–11) |
+| 12 | **Control / leaf forms (LOOSEST)** | `if … then … else …`, postfix `e match { … }`, `throw e`, `try e catch { … }`, `while … do …`, `for … in … do …`, `return e?` | n/a (unbounded; must be parenthesized to be an operand of 1–11) |
 
 Notes:
 
@@ -385,7 +385,7 @@ BoundedArg ::= Literal                     // 1, 3.0, 'c', "s", c"s", true
 
 Everything else — `if`/`match`/`while`/`for`/`throw`/`try`/`return`, any **infix**/**prefix** operator expression, **and any application** (including a construction `T(...)`, since constructors are ordinary functions, §4.2) — is **unbounded** and must be parenthesized to be used as an argument.
 
-> **`(` is not whitespace-significant (v0.3).** A `(` after a callee — tight *or* spaced — is application to the parenthesized argument; only `[` and `.` are whitespace-classified (§5.6). So `f(x, y)` ≡ `f (x, y)` applies `f` to the *tuple* `(x, y)` (one argument), whereas the curried spine `f x y` passes two. This is the OCaml model: juxtaposition curries, parentheses build one tuple/record argument. **Tight vs spaced `[`:** a `[` glued (no whitespace) to an identifier is a type-argument list bound to that callee — never a standalone argument; any other `[` opens an **array literal**, which *is* a bounded argument (full token-level classification table in §5.6). **Arm-blocks are not bounded arguments:** a `{` whose first significant token is `|` is an **arm-block** (§5.4), legal only after `match e` or `catch`; greedy application stops in front of it, which is what lets `match f x { | … }` parse with `f x` as the scrutinee.
+> **`(` is not whitespace-significant (v0.3).** A `(` after a callee — tight *or* spaced — is application to the parenthesized argument; only `[` and `.` are whitespace-classified (§5.6). So `f(x, y)` ≡ `f (x, y)` applies `f` to the *tuple* `(x, y)` (one argument), whereas the curried spine `f x y` passes two. This is the OCaml model: juxtaposition curries, parentheses build one tuple/record argument. **Tight vs spaced `[`:** a `[` glued (no whitespace) to an identifier is a type-argument list bound to that callee — never a standalone argument; any other `[` opens an **array literal**, which *is* a bounded argument (full token-level classification table in §5.6). **Arm-blocks are not bounded arguments:** a `{` whose first significant token is `|` is an **arm-block** (§5.4), legal only after the postfix `match` keyword or after `catch`; greedy application stops in front of it, so `f x match { | … }` has scrutinee `f x` and `f x { y => e }` still passes a trailing closure.
 
 **An application result used as an argument must be parenthesized.** `f (describe x)`, not `f describe x` (which is `(f describe) x`).
 
@@ -414,7 +414,8 @@ f if p then a else b        // ERROR: if is unbounded -> f (if p then a else b)
 map xs x => x + 1           // ERROR: bare closure body -> map xs { x => x + 1 }
 f throw e                   // ERROR: throw unbounded -> f (throw e)
 f describe x                // parses (f describe) x; for f applied to (describe x) write f (describe x)
-h match e { | _ => 0 }      // ERROR: match unbounded -> h (match e { | _ => 0 })
+f e match { | _ => 0 }      // parses (f e) match {…} (postfix); for a match-result arg write f (e match {…})
+f while c do g              // ERROR: while is unbounded -> f (while c do g)
 ```
 
 > **Judgment call (ambiguous `f -1`).** `f -1` (space before `-`, none after) is **rejected as ambiguous**: write `f (-1)` for the negative-literal argument or `f - 1` for subtraction. `a - 1` (spaces around) is always subtraction.
@@ -559,7 +560,6 @@ The entry point is an `object_decl` named `Main` whose body declares `fun main (
 expr        ::= assign_expr
 
 assign_expr ::= if_expr
-             |  match_expr
              |  throw_expr
              |  try_expr
              |  while_expr
@@ -567,7 +567,8 @@ assign_expr ::= if_expr
              |  return_expr
              |  closure
              |  block
-             |  infix_expr ( "=" assign_expr )?       // RHS only when LHS is an assignable var path
+             |  infix_expr "=" assign_expr            // assignment: LHS an assignable var path
+             |  infix_expr ( "match" arm_block )*      // bare expr, optionally POSTFIX-matched (lowest precedence)
 
 if_expr     ::= "if" expr "then" expr "else" expr      // 'else' REQUIRED
 while_expr  ::= "while" expr "do" expr                 // Unit; §7.12
@@ -575,8 +576,10 @@ for_expr    ::= "for" LOWER_ID "in" expr "do" expr     // sugar for e.foreach { 
 return_expr ::= "return" expr?                         // early exit from the enclosing fun (§7.13);
                                                        // the operand, if any, starts on the same line
 
-match_expr  ::= "match" expr arm_block                  // braces required; no 'with'
-arm_block   ::= "{" ( "|" match_arm )+ "}"              // '{' opens on the same logical line
+// 'match' is POSTFIX (Scala-style): the scrutinee is the preceding expression.
+// 'e match { … } match { … }' chains left-associatively. To match the result of a
+// control form (if/throw/while/for/return/try), parenthesize it: '(if c then a else b) match { … }'.
+arm_block   ::= "{" ( "|" match_arm )+ "}"              // braces required; '{' on the same line as 'match'/'catch'
 match_arm   ::= pattern guard? "=>" expr
 guard       ::= "if" infix_expr                         // operator-level only: a guard can
                                                         // never swallow the arm's '=>'
@@ -595,7 +598,7 @@ closure_params ::= ε                                    // '{ => e }'      : Fu
 closure_param  ::= LOWER_ID type_ann?                   // type annotation optional
 ```
 
-> **Arm-block recognition (normative).** A `{` whose first significant token is `|` is an **arm-block**: it is never a bounded argument, a block, or a closure, and it is legal only where `match`/`catch` expect it. This is unambiguous because `|` can begin neither a statement nor a `closure_params` list — `{ |` was dead syntax before this rule. Greedy application therefore stops in front of `{ |`, so `match f x { | A => … }` parses with scrutinee `f x`, while `f x { y => e }` still passes a trailing closure. The arm-block's `{` must open on the **same logical line** as the scrutinee / the `catch` keyword (a line-leading `{` starts a new statement, §3.4 rule 3 — the Go convention). Braces make arm ownership explicit: a nested `match` closes with its own `}`, so the dangling-arm hazard (an outer arm silently captured by an inner match) cannot arise.
+> **Postfix match & arm-block recognition (normative).** `match` is a **postfix** operator at the loosest precedence (level 12): its scrutinee is the preceding `infix_expr`, so `f x match { … }` ≡ `(f x) match { … }` and `a + b match { … }` ≡ `(a + b) match { … }`. The scrutinee is parsed first (greedy application included), the `match` keyword is the explicit separator, and the **arm-block** follows. An arm-block — a `{` whose first significant token is `|` — is never a bounded argument, block, or closure; it is legal only after `match` or `catch`. (The `{ |` signal is still useful: it keeps a `catch` arm-block from being read as a trailing closure, since `|` can begin neither a statement nor a `closure_params` list.) The arm-block's `{` opens on the **same logical line** as its `match`/`catch` keyword (a line-leading `{` starts a new statement, §3.4 rule 3 — the Go convention), while a line-leading `match` continues the previous line (§3.4 rule 3), giving the multi-line `xs.map f` ⏎ `match { … }`. Braces make arm ownership explicit, so the dangling-arm hazard (an outer arm silently captured by an inner `match`) cannot arise.
 
 > **Judgment call (multi-param closures).** A multi-parameter closure uses a **parenthesized** list `{ (x, y) => e }` / `{ (x: Int, y: String) => e }` (types optional) and is a **single** N-parameter (uncurried) closure → one `scala.FunctionN`, applied with a tuple `f (a, b)` (§7.6). Single-param is the bare `{ x => e }`; the empty form `{ => e }` is a `scala.Function0`. There is **no** comma-without-parens form (`{ x, y => e }` is removed). Currying is reserved for named `fun` (multi param list) or explicit nesting `{ x => { y => e } }`. A closure body is a `stmts` sequence like any block: `{ x => log x; x + 1 }` (the last expression is the value).
 
@@ -764,7 +767,7 @@ Right-associativity of `->` and the layering union-looser-than-intersection-loos
 8. **Bracket classification:** `map[Int] xs` type-applies `map` then applies it to `xs`; `map [1, 2]` applies `map` to the array literal `[1, 2]`; `val a=[1, 2, 3]` is an array literal (the `[` follows `=`, not an identifier); `f(x, y)` ≡ `f (x, y)` applies `f` to the tuple `(x, y)` (one argument; write `f x y` for two).
 9. **Newline termination:** `f x ⏎ (y)` is two statements (a `(`-led line never continues an application); `xs.filter p ⏎ .map f` is one chain (leading-`.` continuation, §3.4).
 10. **Spacing around `.`:** `x.m` is tight selection on `x`; `x .m` is chain selection on the accumulated value to its left.
-11. **Arm-block vs trailing closure:** `match f x { | A => 1 | B => 2 }` — application stops before `{ |`, so the scrutinee is `f x`; `f x { y => e }` still passes a trailing closure.
+11. **Postfix match vs trailing closure:** `f x match { | A => 1 | B => 2 }` — the scrutinee is the application `f x`, then postfix `match`; `f x { y => e }` (no `match`) still passes a trailing closure.
 
 ### 5.11 Out of MVP scope (not in this grammar)
 
@@ -1067,7 +1070,7 @@ val sign = if n < 0 then -1 else if n > 0 then 1 else 0
 
 ### 7.5 `match`
 
-Canonical (and only) form: `match e { | pat => e2 | … }` — a braced **arm-block** (§5.4); the `{` opens on the same logical line as the scrutinee. The scrutinee evaluates once, left-to-right before any arm. Arms are tried top to bottom; the first whose pattern matches (and whose optional guard, evaluated only after a structural match, is `true`) is selected. The result type is the LUB of all arm bodies (subject to the §7.4 join rules).
+Canonical (and only) form: postfix `e match { | pat => e2 | … }` — the scrutinee `e` precedes the `match` keyword, which precedes a braced **arm-block** (§5.4); the `{` opens on the same logical line as `match`. The scrutinee evaluates once, left-to-right before any arm. Arms are tried top to bottom; the first whose pattern matches (and whose optional guard, evaluated only after a structural match, is `true`) is selected. The result type is the LUB of all arm bodies (subject to the §7.4 join rules).
 
 | Pattern | Matches | Binds |
 |---|---|---|
@@ -1087,7 +1090,7 @@ A bare lowercase identifier is always a **binder**. A name may not be bound twic
 type Shape = | Circle(Double) | Rect(w: Double, h: Double)
 
 fun area (s: Shape): Double =
-  match s {
+  s match {
   | Circle r            => 3.14159 * r * r
   | Rect (w = w, h = h) => w * h
   }
@@ -1240,7 +1243,7 @@ fun indexOf (xs: Array[Int]) (x: Int): Int = {
 | `while c do e` | `c`; if `true`: `e`, then re-test (loop) |
 | `for x in e do b` | desugars to `e.foreach { x => b }` |
 | `return e` | `e`, then exit the enclosing `fun` |
-| `match e { … }` | `e` once; arms top-to-bottom; guard after structural match |
+| `e match { … }` | `e` once; arms top-to-bottom; guard after structural match |
 | `f a b` | `f`, then `a`, then `b`, then call |
 | `recv.m args` | `recv`, then args L-to-R, then dispatch |
 | `lhs .m args` | `lhs`, then args L-to-R, then dispatch; result is next receiver |
@@ -1325,7 +1328,7 @@ A sealed ADT `type Option[A] = | Some(A) | None` lowers to:
 
 > **Judgment call.** A nullary variant (`None`, `Leaf`) lowers to a **singleton module** `Option$None$` (reusing the module-accessor machinery, §8.5), mirroring Scala 3 `case object`s and avoiding per-use garbage.
 
-**`match e { | Some x => a | None => b }`** lowers exactly the way the backend already discriminates sealed types — **not** via a tag field/integer switch. The plugin emits `Inst.Switch` *only* for literal/primitive-value scrutinees; constructor/sealed-type discrimination uses `Op.Is`/`Op.As` type tests, which `Lower` compiles to a **class-id range check** against the linker-assigned id interval in RTTI (`idRangeUntil`). Therefore:
+**`e match { | Some x => a | None => b }`** lowers exactly the way the backend already discriminates sealed types — **not** via a tag field/integer switch. The plugin emits `Inst.Switch` *only* for literal/primitive-value scrutinees; constructor/sealed-type discrimination uses `Op.Is`/`Op.As` type tests, which `Lower` compiles to a **class-id range check** against the linker-assigned id interval in RTTI (`idRangeUntil`). Therefore:
 
 - For each non-default arm, emit `Op.Is(Type.Ref(Option$Some), e)` (a single class-id range comparison over the sealed hierarchy's contiguous id range), branch with `Inst.If`.
 - On the matched branch, `Op.As(Type.Ref(Option$Some), e)` then `Op.Fieldload` to bind payload fields.
@@ -1479,7 +1482,7 @@ type Tree[A] =
   | Node(left: Tree[A], value: A, right: Tree[A])
 
 fun insert (t: Tree[Int]) (x: Int): Tree[Int] =
-  match t {
+  t match {
   | Leaf => Node(left = Leaf, value = x, right = Leaf)
   | Node(left = l, value = v, right = r) =>
       if x < v then Node(left = insert l x, value = v, right = r)
@@ -1488,7 +1491,7 @@ fun insert (t: Tree[Int]) (x: Int): Tree[Int] =
   }
 
 fun sumTree (t: Tree[Int]): Int =
-  match t {
+  t match {
   | Leaf => 0
   | Node(left = l, value = v, right = r) => sumTree l + v + sumTree r
   }
@@ -1631,7 +1634,7 @@ type Expr =
 class DivByZero (msg: String) <: Throwable(msg)
 
 fun eval (e: Expr): Double =
-  match e {
+  e match {
   | Num(n)            => n
   | Add(l = a, r = b) => eval a + eval b
   | Sub(l = a, r = b) => eval a - eval b
