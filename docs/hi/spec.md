@@ -2,31 +2,6 @@
 
 > A statically-typed, expression-oriented, native-compiled language implemented as a new frontend that emits Scala Native's NIR and reuses the entire Scala Native backend.
 
-## Changelog
-
-### v0.3 (from v0.2)
-
-- **OCaml-style application & first-class constructors.** Parentheses are no longer whitespace-significant — `f(x, y)` ≡ `f (x, y)` applies `f` to the *tuple* `(x, y)`, while curried juxtaposition `f x y` is unchanged. Constructors are ordinary **first-class functions** (`map Some`, `val mk = Node`, `Node a`); the level-2 construction special case is gone, so a constructed value used as a juxtaposed argument or selected from needs parentheses or a chain dot (`f (Point(x=1))`, `(Point(x=1)).x` or `Point(x=1) .x`) — exactly as for any application result. Closures take a parenthesized, optionally-typed parameter list `{ (x: Int, y: String) => e }` and stay uncurried (one `FunctionN`, tuple-applied). (§4, §5.4, §7.6)
-- **ADT payloads use parentheses, not `of`.** `type Option[A] = | Some(A) | None`, `| Node(left: Tree, value: A, right: Tree)` — positional `C(T…)` or named `C(f: T, …)`, mirroring construction and struct/class fields; the `of` keyword is removed. (§5.3, §6.7)
-- **Postfix `match`.** The scrutinee comes first — `e match { | … }` (Scala-style), a lowest-precedence postfix. It reads naturally after method chains (`xs.map f match { … }`) and removes the cramped adjacent-brace case when the scrutinee ends in a callback. `match` becomes a continuation keyword (a line-leading `match` joins the previous line); `try e catch { … }` is unchanged. (§4.1, §5.4, §7.5)
-- **Comma-separated parent lists.** Inheritance keeps `<:` (consistent with the `[A <: Bound]` subtype-bound notation; `>:` stays reserved for a future lower bound) but lists parents with commas instead of repeated `with` — `class Dog (name: String) <: Animal(name), Runnable, Comparable[Dog]`. `with` is now reserved for functional update only. (§5.3)
-
-### v0.2 (from v0.1)
-
-- **Significant newlines.** Statements are newline-terminated (§3.4); the `do` effect-marker and tail-`return` value-marker are removed; a block's last expression is its value.
-- **`return` is early function exit.** Java/Rust semantics (§7.13).
-- **`while`/`for` loops** join the MVP (§7.12) — `while c do e`, `for x in e do body`; `do` now introduces loop bodies.
-- **Chain selection ` .m`** (whitespace-preceded dot) replaces the `/.` operator (§4.2).
-- **Array literals** `[1, 2, 3]` (spaced `[`) and the array-argument varargs idiom join the MVP (§5.6); tight `f[T]` remains type application.
-- **Closure → SAM conversion** joins the MVP (§7.6, §8.1), unblocking `Runnable`/virtual threads.
-- **Minimal Hi standard library** `std.io` (`print`/`println`/`printf`) replaces raw libc `printf` in the examples (§10.2).
-- **`try e catch | …`** replaces `try e with` (§7.11), removing the handler-vs-struct-update collision.
-- **One-field records** need no trailing comma: `(x = 1)` / `(x: Int)` (§5.7).
-- **Built-in operator semantics** defined (§7.15); the struct GC-restriction lift path documented (§6.3).
-- **Braced arm-blocks**: `match e { | … }` and `try e catch { | … }` — braces delimit the arms, eliminating the dangling-arm ambiguity; `with` no longer introduces match arms.
-- **Unified functional update**: `base with (f = v, …)` is the single form for records, structs, and classes; the spread form `(..base, …)` and the `..` token are removed.
-- **Parser-precision fixes**: innermost-delimiter newline rule; guards are operator-level expressions; an empty parameter list declares one `Unit` parameter; bracket classification is token-level (§5.6 table) — `val a=[1,2,3]` is an array literal (the construction / paren-call rules introduced here were superseded by v0.3's OCaml application model, above); `given` instances with members use the braced form.
-
 ---
 
 ## Table of Contents
@@ -42,6 +17,8 @@
 9. [Example Programs](#9-example-programs)
 10. [Implementation & Build Integration](#10-implementation--build-integration)
 11. [Open Decisions](#11-open-decisions)
+
+**Appendix:** [Changelog](#changelog)
 
 ---
 
@@ -1831,3 +1808,32 @@ The following are genuine choices still left to the language designer. (Items th
 7. **Cross-unit canonical-record hashing collisions.** §8.6 derives record class names from a hash of the sorted signature; the hash width and collision-resolution policy (fall back to full mangled signature on collision?) is left to the implementer.
 
 8. **Bitwise and shift operators.** The value-operator set has xor `^` but no bitwise and/or/shifts, because `&` and `|` are type-context-only tokens (§4.1). Candidates: word-named extension methods on the integer types (`band`/`bor`/`shl`/`shr`/`ushr`, OCaml-style) or new operator lexemes slotted into the §4.1 table. Needed before serious `Ptr`/flags/bit-manipulation code is writable.
+
+---
+
+## Changelog
+
+*Newest first. Each entry is a delta against the previous spec version; `§` references point into the sections above. New versions append a `###` subsection here.*
+
+### v0.3 (from v0.2)
+
+- **OCaml-style application & first-class constructors.** Parentheses are no longer whitespace-significant — `f(x, y)` ≡ `f (x, y)` applies `f` to the *tuple* `(x, y)`, while curried juxtaposition `f x y` is unchanged. Constructors are ordinary **first-class functions** (`map Some`, `val mk = Node`, `Node a`); the level-2 construction special case is gone, so a constructed value used as a juxtaposed argument or selected from needs parentheses or a chain dot (`f (Point(x=1))`, `(Point(x=1)).x` or `Point(x=1) .x`) — exactly as for any application result. Closures take a parenthesized, optionally-typed parameter list `{ (x: Int, y: String) => e }` and stay uncurried (one `FunctionN`, tuple-applied). (§4, §5.4, §7.6)
+- **ADT payloads use parentheses, not `of`.** `type Option[A] = | Some(A) | None`, `| Node(left: Tree, value: A, right: Tree)` — positional `C(T…)` or named `C(f: T, …)`, mirroring construction and struct/class fields; the `of` keyword is removed. (§5.3, §6.7)
+- **Postfix `match`.** The scrutinee comes first — `e match { | … }` (Scala-style), a lowest-precedence postfix. It reads naturally after method chains (`xs.map f match { … }`) and removes the cramped adjacent-brace case when the scrutinee ends in a callback. `match` becomes a continuation keyword (a line-leading `match` joins the previous line); `try e catch { … }` is unchanged. (§4.1, §5.4, §7.5)
+- **Comma-separated parent lists.** Inheritance keeps `<:` (consistent with the `[A <: Bound]` subtype-bound notation; `>:` stays reserved for a future lower bound) but lists parents with commas instead of repeated `with` — `class Dog (name: String) <: Animal(name), Runnable, Comparable[Dog]`. `with` is now reserved for functional update only. (§5.3)
+
+### v0.2 (from v0.1)
+
+- **Significant newlines.** Statements are newline-terminated (§3.4); the `do` effect-marker and tail-`return` value-marker are removed; a block's last expression is its value.
+- **`return` is early function exit.** Java/Rust semantics (§7.13).
+- **`while`/`for` loops** join the MVP (§7.12) — `while c do e`, `for x in e do body`; `do` now introduces loop bodies.
+- **Chain selection ` .m`** (whitespace-preceded dot) replaces the `/.` operator (§4.2).
+- **Array literals** `[1, 2, 3]` (spaced `[`) and the array-argument varargs idiom join the MVP (§5.6); tight `f[T]` remains type application.
+- **Closure → SAM conversion** joins the MVP (§7.6, §8.1), unblocking `Runnable`/virtual threads.
+- **Minimal Hi standard library** `std.io` (`print`/`println`/`printf`) replaces raw libc `printf` in the examples (§10.2).
+- **`try e catch | …`** replaces `try e with` (§7.11), removing the handler-vs-struct-update collision.
+- **One-field records** need no trailing comma: `(x = 1)` / `(x: Int)` (§5.7).
+- **Built-in operator semantics** defined (§7.15); the struct GC-restriction lift path documented (§6.3).
+- **Braced arm-blocks**: `match e { | … }` and `try e catch { | … }` — braces delimit the arms, eliminating the dangling-arm ambiguity; `with` no longer introduces match arms.
+- **Unified functional update**: `base with (f = v, …)` is the single form for records, structs, and classes; the spread form `(..base, …)` and the `..` token are removed.
+- **Parser-precision fixes**: innermost-delimiter newline rule; guards are operator-level expressions; an empty parameter list declares one `Unit` parameter; bracket classification is token-level (§5.6 table) — `val a=[1,2,3]` is an array literal (the construction / paren-call rules introduced here were superseded by v0.3's OCaml application model, above); `given` instances with members use the braced form.
