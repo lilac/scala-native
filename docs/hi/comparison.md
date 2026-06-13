@@ -172,7 +172,18 @@ object Main {
 }
 ```
 
-`dyn Show` is the existential `AnyShow` was emulating: each element is packed with its `given Show[…]` at the coercion (the array literal), and `.show` dispatches through the carried dictionary. It lowers to a synthesized class holding payload + dictionary — **no new NIR**, same machinery you wrote by hand. (Owned types never need this: `class C <: Show` already gives per-element dynamic dispatch via the real itable.)
+`dyn Show` is the existential `AnyShow` was emulating: each element is packed with its `given Show[…]` at the coercion (the array literal — packing is **implicit and type-directed**, no `as` cast, driven by the expected `dyn Show`), and `.show` dispatches through the carried dictionary. It lowers to a synthesized class holding payload + dictionary — **no new NIR**, same machinery you wrote by hand.
+
+Don't reach for `dyn` when you own the types — a bare trait-as-type is plain nominal subtyping and already works:
+
+```hi
+class Dog (name: String) <: Show { fun show (self) = "Dog" }
+class Cat (name: String) <: Show { fun show (self) = "Cat" }
+
+val pets: Array[Show] = [ Dog("rex"), Cat("tom") ]   // no dyn, no box — each carries its own itable
+```
+
+`Array[Show]` holds values that conform via `<:` (zero packing, dispatch through each value's itable). `Array[dyn Show]` is only for *retroactive* instances (`given Show[Int]`), where the value isn't a `Show` subtype and must be boxed with its dictionary. Two types, two representations — kept distinct on purpose (the reason Swift moved from an implicit `[Show]` existential to an explicit `any`).
 
 ---
 
@@ -182,7 +193,7 @@ These trip up newcomers regardless of source language ([spec §4](spec.md)):
 
 - **Whitespace decides the dot.** `a.f` (tight) is tightest-precedence selection; `a .f` (space before `.`) is *chain selection* at application precedence — `3.add 4 .times 5` means `((3.add 4).times 5)`. Put a space before every chaining dot.
 - **Juxtaposition curries; parens build one tuple.** `f x y` passes two curried args; `f (x, y)` passes **one** tuple. (OCaml model — `(` is not whitespace-significant.)
-- **`else` is mandatory.** `if c then a else b` is an expression; there is no one-armed `if`.
+- **`if` is an expression; `else` is optional only for `Unit`.** `if c then a else b` yields a value (both branches required); a one-armed `if c then a` is allowed when `a : Unit` (guard clauses like `if a > 10 then return`).
 - **`match` is postfix.** `e match { | pat => … }`, and it chains after method pipelines: `xs .map f match { … }`.
 - **Significant newlines, no indentation rule.** A newline ends a statement (with continuation rules); indentation never opens a scope. A line starting with `(`/`[`/`+`/`-` is a *new* statement — wrap long calls in parens.
 - **Lambdas use braces, never `fun`.** `{ x => e }`, `{ (x, y) => e }`; `fun` is only for named declarations.

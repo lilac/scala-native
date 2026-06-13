@@ -113,7 +113,7 @@ This table is the authoritative MVP feature boundary. "Judgment call" rows mark 
 | Value vs reference types | `struct` (value), `class` (reference) | `struct`: no identity, no inheritance; fields limited to primitives, `Ptr`, and nested all-primitive/`Ptr` structs (§6.3). `class`: heap, identity, single inheritance + traits, participates in `<:`. |
 | ADTs | sealed variants `type Option[A] = \| Some(A) \| None` (paren payloads) | Lower to a reference-backed tagged **class** hierarchy (sealed base `class` + case subclasses); `match` → class-id range-test decision tree. |
 | Pattern matching | `e match { \| pat => e2 … }` (postfix, braced arm-block), exhaustiveness checking | Sealed-ADT exhaustiveness is a **compile error** (§6.7, §7). Postfix `match`; braces delimit the arms (§5.4). |
-| Control flow | `if c then a else b` (`else` REQUIRED); `while c do e` and `for x in e do body` loops; blocks `{ stmt* }` of newline-terminated statements; `return` = early exit from the enclosing `fun` | Expression-oriented; significant newlines (§3.1, §3.4). Block value = final expression statement, else `Unit`. Loops type to `Unit`; `for` desugars to `foreach` (§7.12). |
+| Control flow | `if c then a else b`; one-armed `if c then a` allowed **iff `a : Unit`** (implicit `else ()`), the guard-clause form `if cond then return`; `while c do e` and `for x in e do body` loops; blocks `{ stmt* }` of newline-terminated statements; `return` = early exit from the enclosing `fun` | Expression-oriented; significant newlines (§3.1, §3.4). Block value = final expression statement, else `Unit`. Loops type to `Unit`; `for` desugars to `foreach` (§7.12). |
 | Error handling | `throw expr`, `try e catch { \| Pattern => handler … }` | Exceptions only; maps to NIR unwind / `Throwable`. No `finally`. |
 | Tuples & records | tuples `(1, 2)`; named tuples `(x = 1, y = 2)`, one-field `(x = 1)`; structural record TYPES `(x: Int, y: Int)`, one-field `(x: Int)` | Structural identity = field-name set + types, order-independent, deterministic canonical layout. Trailing commas permitted, never required (§5.7). |
 | Functional update | `base with (field = v, …)` — one form for records, structs, and classes | Type-directed sugar over a base of known static type; desugars to full rebuild copying unchanged fields. No row polymorphism. |
@@ -138,7 +138,7 @@ This table is the authoritative MVP feature boundary. "Judgment call" rows mark 
 | **Value-backed enums** | ADTs lower to a reference-backed tagged class hierarchy; unboxed/value-backed enum representations are deferred. |
 | **Value structs holding managed references** | GC safety rule: a managed ref embedded in a by-value struct that becomes a field of a heap object is not scanned precisely and may be collected prematurely. Stack-only value structs with refs would need per-shape RTTI; deferred. *Lift path (post-MVP):* recurse `MemoryLayout.referenceFieldsOffsets` into nested `StructValue`s (the GC markers already walk arbitrary offset arrays), or flatten ref-carrying structs into their containers in the frontend; `Array[struct-with-refs]` stays deferred either way (§6.3). |
 | **Higher-kinded types; variance; lower bounds; context bounds** | Generics are first-order, invariant, upper-bounds-only. Contextual requirements use explicit `using` parameters. |
-| **`dyn Trait` (existential trait objects)** | Retroactive *dynamic* dispatch on a type you do not own — a `List[dyn Show]` of mixed payloads. The principled replacement for Rust's `dyn`/Swift's `any`: an existential box pairing a payload with its resolved `given` dictionary, lowering to a synthesized `Defn.Class` (no new NIR). Deferred because the owned-type case is already covered by `<:` (real itable, §6.10) and the foreign-heterogeneous case is rare; until it ships, pair value + dictionary by hand in a one-field wrapper class. Keyword `dyn` is reserved (§3.5). |
+| **`dyn Trait` (existential trait objects)** | Retroactive *dynamic* dispatch on a type you do not own — an `Array[dyn Show]` of mixed payloads. The principled replacement for Rust's `dyn`/Swift's `any`: an existential box pairing a payload with its resolved `given` dictionary, lowering to a synthesized `Defn.Class` (no new NIR). Distinct from a bare trait-as-type: `Array[Show]` is plain **nominal subtyping** (holds values that conform via `<:`, no box) and already works; `Array[dyn Show]` is the **existential** that also admits retroactive `given` instances. Coercion *into* `dyn Trait` is **implicit and type-directed** (no `as` cast) — assigning `[3, true, 7]` to an `Array[dyn Show]` packs each element — keeping the type explicit (cost-visible, the lesson behind Swift's `any`) while preserving ergonomics. Deferred because the owned-type case is covered by `<:` and the foreign-heterogeneous case is rare; until it ships, pair value + dictionary by hand in a one-field wrapper class. Keyword `dyn` is reserved (§3.5). |
 | **`using`-constrained extensions** (`extension (x: A) (using Show[A]) { … }`) | Conditional/typeclass-keyed extension methods (Scala 3's `extension (x: A)(using …)`, Swift's `where`-constrained extensions). Deferred: typeclass-keyed methods surface through `trait` + `given` instead (the trait-method-via-given tier of `.m` resolution, §6.10), and plain `extension` stays unconditional. A clean future extension point. |
 | **Macros / compile-time metaprogramming** | No metaprogramming surface. |
 | **`async`/`await`; `break`/`continue`; non-local `return` from closures** | Concurrency is via OS threads and reused virtual threads — no built-in async surface. `while`/`for` and early-exit `return` are in the MVP (§7.12, §7.13); loop `break`/`continue` and `return` crossing a closure boundary are deferred (keywords reserved, §3.5). |
@@ -258,7 +258,7 @@ yield   lazy   inline   mutable   as   dyn
 
 > **Judgment call (`dyn` reserved).** `dyn` is reserved for the deferred existential trait-object form `dyn Trait` (§2.2) — retroactive *dynamic* dispatch on a foreign/value type, lowering to a payload-plus-`given`-dictionary box. It is not active in the MVP; the owned-type dynamic case is served by the `<:` clause (§6.10).
 
-> **Judgment call.** `then`/`else` are full keywords (required by `if c then a else b`). `extends`/`derives` are *not* reserved; inheritance uses the `<:` clause (§5).
+> **Judgment call.** `then`/`else` are full keywords. `then` is required after an `if` condition; `else` is optional — a one-armed `if c then e` is legal when `e : Unit` (§7.4). `extends`/`derives` are *not* reserved; inheritance uses the `<:` clause (§5).
 
 ### 3.6 Literals
 
@@ -499,7 +499,9 @@ param       ::= "using"? LOWER_ID type_ann? ( "=" expr )?
 
 #### Receiver convention for methods (`self`)
 
-Inside a `trait`, `class`, `struct`, or braced `given` body, a method may take its receiver as an explicit first parameter named `self`. **`self` is the one parameter exempt from the §6.1 annotation requirement**: when written without an annotation, its type defaults to the enclosing type (for a generic enclosing type, the fully-applied self-type, e.g. inside `trait Show[A]` the self is `A`). It may be annotated explicitly (`fun show (self: A): String`) and the two spellings are equivalent. Extension methods do not use `self`; their receiver is bound by the `extension` header.
+Inside a `trait`, `class`, `struct`, or braced `given` body, a method may take its receiver as an explicit first parameter named `self`. **`self` is the one parameter exempt from the §6.1 annotation requirement**: when written without an annotation, its type defaults to the enclosing type (for a generic enclosing type, the fully-applied self-type, e.g. inside `trait Show[A]` the self is `A`). It may be annotated explicitly (`fun show (self: A): String`) and the two spellings are equivalent. Bare `self` (unannotated) is the **idiomatic** spelling; write the annotation only when it aids the reader. Extension methods do not use `self`; their receiver is bound by the `extension` header.
+
+> **Why `self` is explicit (and not an implicit `this`).** Hi's traits are **parameter-based** (`trait Show[A]`, like Haskell `class Show a` and Scala 3 typeclasses), not Self-based (Rust/Swift implicit `Self`). In a parameter-based trait the *dictionary* (the `Show[A]` value) and the *operated-on value* (`A`) are distinct, so an implicit `this` would be ambiguous — it would name the dictionary, not the value. Naming the receiver `self: A` makes one trait declaration serve **both** satisfaction paths (§6.10): nominal `<:` binds `self` to the instance; retroactive `given` binds it to the operand. It also lets a member **omit** `self` to become an *associated* (static) member with no receiver — `trait Monoid[A] { fun empty: A;  fun combine (self: A) (o: A): A }` — and supports multi-parameter classes (`trait Convert[A, B] { fun convert (self: A): B }`), neither of which an implicit `Self` expresses.
 
 #### Type declarations: aliases and ADTs
 
@@ -576,7 +578,7 @@ assign_expr ::= if_expr
              |  infix_expr "=" assign_expr            // assignment: LHS an assignable var path
              |  infix_expr ( "match" arm_block )*      // bare expr, optionally POSTFIX-matched (lowest precedence)
 
-if_expr     ::= "if" expr "then" expr "else" expr      // 'else' REQUIRED
+if_expr     ::= "if" expr "then" expr ( "else" expr )? // 'else' optional; one-armed iff then-branch : Unit (§7.4)
 while_expr  ::= "while" expr "do" expr                 // Unit; §7.12
 for_expr    ::= "for" LOWER_ID "in" expr "do" expr     // sugar for e.foreach { x => body }; §7.12
 return_expr ::= "return" expr?                         // early exit from the enclosing fun (§7.13);
@@ -1031,7 +1033,11 @@ A selection `recv.m` or chain step `recv .m` (§4.2) resolves `m` against the re
 
 This is the single rule behind §4.2's statement that `.m` steps and `a.f` selections "resolve as methods/extensions on the receiver's type": *methods* = tier 1, *extensions* = tier 2, *trait-via-given* = tier 3. Members beat extensions (the Scala 3 rule); nothing here is type-directed beyond the receiver's own static type.
 
-> **Note (retroactive *dynamic* dispatch is deferred — `dyn Trait`).** Tiers 2–3 are static: `3 .show` via a `given` dispatches on the *static* receiver, exactly as Haskell/Rust/Scala typeclasses do. Genuine per-element dynamic dispatch on a type you do not own (a heterogeneous `List[dyn Show]`) needs an **existential**: a box pairing the payload with its resolved `given` dictionary — precisely what Rust's `dyn Trait` fat pointer and Swift's `any P` witness-table box are. Neither language mutates the foreign type's own vtable; both attach an external dictionary at the existential boundary, which is the dictionary Hi already has. Hi defers the `dyn Trait` sugar (§2.2) — owned types already get dynamic dispatch via `<:`; until `dyn` ships, pair payload + dictionary by hand in a one-field wrapper `class` (worked example in `comparison.md`).
+> **Note (a trait as a type: nominal `Array[Show]` vs existential `Array[dyn Show]`).** Using a trait in type position has **two** meanings, kept as distinct types so one syntax never has two representations:
+> - **`Array[Show]` — nominal subtyping (works today).** Holds references that conform via `<:` (`class Dog <: Show`); each carries its own itable, dispatch is dynamic, no box. `val xs: Array[Show] = [Dog(...), Cat(...)]` type-checks by subsumption. `3` cannot go here — `Int` is not a subtype of `Show`.
+> - **`Array[dyn Show]` — existential (deferred, §2.2).** Each element is a box pairing the payload with its resolved `given` dictionary, so it admits *retroactive* instances (`given Show[Int]`): `val xs: Array[dyn Show] = [3, true, 7]`. Coercion into `dyn Show` is **implicit and type-directed** — driven by the expected type, no `as` cast and no general implicit conversion — exactly how Rust coerces to `dyn` and Swift to `any`. The cost (allocation + indirect dispatch) stays visible in the type, which is why Swift moved from an implicit `[Show]` existential to an explicit `any` and Hi keeps `dyn`.
+>
+> Tiers 2–3 above are **static**: `3 .show` via a `given` dispatches on the *static* receiver, as Haskell/Rust/Scala typeclasses do. The existential is the only path to per-element dynamic dispatch over a *foreign* type. Neither Rust nor Swift mutates the foreign type's own vtable; both attach an external dictionary at the existential boundary — the dictionary Hi already has. Until `dyn` ships, pair payload + dictionary by hand in a one-field wrapper `class` (worked example in `comparison.md`).
 
 ### 6.11 Summary of compile-time guarantees
 
@@ -1085,12 +1091,17 @@ val r = {
 }
 ```
 
-### 7.4 `if` (else required)
+### 7.4 `if`
 
-`if c then a else b` evaluates `c : Bool`, then exactly one branch (short-circuit). **`else` is mandatory.** The result type is the **LUB** of the two branch types (§6.9): mixing a value-type branch with a reference-type branch is a compile error (no implicit boxing at joins), and two value-struct branches must have identical value type. Lowering is `Inst.If` with both branches jumping to a join label carrying the result (SSA phi).
+`if c then a else b` evaluates `c : Bool`, then exactly one branch (short-circuit). The result type is the **LUB** of the two branch types (§6.9): mixing a value-type branch with a reference-type branch is a compile error (no implicit boxing at joins), and two value-struct branches must have identical value type. Lowering is `Inst.If` with both branches jumping to a join label carrying the result (SSA phi).
+
+**One-armed `if` (`else` optional).** `else` may be omitted **iff the then-branch has type `Unit`**; `if c then e` is then exactly `if c then e else ()` and has type `Unit`. This is the conditional-effect / guard-clause form — `if cond then return`, `if missing then log "…"` — without the noise of an explicit `else ()`. To produce a **non-`Unit`** value, both branches are required, so the LUB above is always defined: a one-armed `if` is a statement-shaped effect, a two-armed `if` is a value. (Because `return`/`throw` have type `Nothing <: Unit`, `if a > 10 then return` and `if bad then throw e` are well-typed one-armed forms.)
+
+> **Dangling `else` (normative).** An `else` binds to the **nearest** preceding `then` that lacks one. So `if a then if b then x else y` parses as `if a then (if b then x else y)` — the inner `if` takes the `else`, and the outer is one-armed (requiring its then-branch, the inner `if`, to be `Unit`). This is decided by one token of lookahead after the then-branch (peek for `else`); no backtracking, consistent with §1.5's bounded-lookahead rule.
 
 ```hi
-val sign = if n < 0 then -1 else if n > 0 then 1 else 0
+val sign = if n < 0 then -1 else if n > 0 then 1 else 0   // two-armed: value (LUB Int)
+if missing then log "not found"                           // one-armed: effect (Unit)
 ```
 
 ### 7.5 `match`
@@ -1251,7 +1262,7 @@ fun sumTo (n: Int): Int = {
 fun indexOf (xs: Array[Int]) (x: Int): Int = {
   var i = 0
   while i < xs.length do {
-    if xs.get i == x then return i else ()
+    if xs.get i == x then return i              // one-armed guard clause (§7.4)
     i = i + 1
   }
   -1
@@ -1863,6 +1874,8 @@ The following are genuine choices still left to the language designer. (Items th
 
 ### v0.3 (from v0.2)
 
+- **One-armed `if` (`else` now optional).** `else` may be omitted when the then-branch is `Unit` (`if c then e` ≡ `if c then e else ()`), enabling guard clauses like `if a > 10 then return`; a non-`Unit` value still requires both branches, so the LUB stays defined. `else` binds to the nearest `then`. (§2.1, §3.5, §5.4, §7.4)
+- **Clarify `self` and `dyn`.** Bare `self` (unannotated) is documented as idiomatic, with the rationale for explicit-`self` over implicit `this` (parameter-based traits; associated/multi-param members). A trait used as a type is split: `Array[Show]` is nominal subtyping (works today), `Array[dyn Show]` is the deferred existential, and coercion into `dyn` is implicit/type-directed (no `as`). (§2.2, §5.3, §6.10)
 - **`impl` removed; one typeclass mechanism.** The Rust-borrowed `impl Trait for Type` form is gone — it was a second surface over the same dictionary search as `given`, strictly *less* expressive (no conditional instances), and required the "`impl` first, then `given`" tie-break. Trait satisfaction now has exactly two paths: *nominal* at the definition via the `<:` clause (dynamic dispatch via itable, owned types) and *retroactive* via `given` (dictionary, foreign/value/primitive types, conditional instances). Coherence — `impl`'s one real guarantee — is recovered as a **closed-world `given` uniqueness** rule (one per `(Trait, type-head)`), checkable thanks to the closed-world linker. The `impl` keyword is dropped from the reserved set. (§2.1, §3.5, §5.2, §5.3, §6.10, §6.11, §8.8, §9.4)
 - **Unified `.m` resolution order.** `recv.m` / `recv .m` resolves in a fixed three-tier order — (1) intrinsic/itable member, (2) in-scope `extension`, (3) trait method witnessed by an in-scope `given` — with ambiguity *within* a tier an error. This makes the prior "methods/extensions on the receiver's type" prose precise and gives `3 .show`-style trait calls a defined meaning without `impl`. (§4.2, §6.10)
 - **Traits get default methods; `fun` bodies are optional.** `fun_decl`'s body is now optional: bodiless ⇒ abstract member (`Defn.Declare`, trait-only), with-body ⇒ concrete. A concrete trait member is a *default method* — yielding Swift "protocol-extension defaults" while dispatching through the same mechanism as any trait member (no Swift-style static/dynamic split). (§5.3, §6.10)
