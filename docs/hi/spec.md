@@ -316,6 +316,7 @@ Notes:
 - **Closures `{ … => … }` and blocks `{ … }` are bounded** (brace-delimited, self-delimiting). They are **not** in the level-12 unbounded set: they may appear bare as a whitespace-application argument *and* as an operand of any operator. (`a + { x => e }` is legal.)
 - `==`/`!=` (level 9) and relational (level 8) **do not chain**: `a < b < c` is a type error (§6).
 - **`-` is prefix (level 4)** at the start of an expression / after another operator / after `(` `[` `,` `=` `=>`; it is infix additive (level 6) after a complete operand. Prefix binds *looser* than application: `-f x` ≡ `-(f x)`.
+- **Bitwise `|`/`&`, shifts `<<`/`>>`/`>>>`, and unary `~` are not fixed operators.** They are provided as built-in chain-selection methods — `.or`, `.and`, `.xor`, `.shl`, `.shr`, `.ushr`, `.not` — on all integer primitive types (§7.15). This avoids extending the fixed operator table and follows the general idiom (§4.2) that any single-argument method is usable as a binary operator via `a .method b`.
 
 **Type-context operators (separate precedence ladder).** `&`, `|`, and `->` are **type-context only** and never participate in the value-operator climb. In *type* contexts the ladder is (loosest → tightest), matching §5's type grammar:
 
@@ -327,16 +328,18 @@ type application  (List[Int], F[G[X]])
 atoms (tightest)
 ```
 
-The lexer emits one token for each of `&`/`|`/`->`; the parser selects the type interpretation by context. In *expression* contexts `|` appears only as the arm bar inside arm-blocks (§5.4); `&` never appears (intersection is a type; functional update uses `with`, §6.6).
+The lexer emits one token for each of `&`/`|`/`->`; the parser selects the type interpretation by context. In *expression* contexts `|` appears only as the arm bar inside arm-blocks (§5.4); `&` never appears as a standalone value operator (intersection is a type; functional update uses `with`, §6.6). Bitwise AND/OR operations use the chain-selection methods `.and`/`.or` instead (§7.15).
 
 ### 4.2 Selection (tight `.`) and chain selection (` .m`)
 
 **Whitespace decides between the two dots.** A `.` that is *not* preceded by whitespace (and is not inside a float literal, §3.6) is **selection** — level 1, tightest — binding to the immediately preceding primary. A `.` that *is* preceded by whitespace or a newline (and followed by a `LOWER_ID`) is **chain selection** — level 3, application precedence, left-associative, sharing the single application level with whitespace application.
 
 - **Tight `.` is tightest (level 1).** `a.f x.g y` parses as `(a.f) (x.g) y`: `a.f` is a selection yielding a callable, then whitespace-applied to args `x.g` and `y`.
-- **`.` selects; method args arrive by application.** Selection `a.f` yields a callable; you apply it by juxtaposition `a.f x y` (curried) or with a tuple `a.f (x, y)`. There is **no Java-style two-arg paren-call**: `a.f(x, y)` applies the selected `a.f` to the *single* tuple `(x, y)` (parens build one argument, §4.3), so for two curried args write `a.f x y`; `a.f(x)` ≡ `a.f x` (the parens are grouping). A field or **nullary** method/getter `a.f` is invoked by the selection alone; a non-nullary method named bare (`recv.m` with no args) eta-expands to a closure (§6, §7). A nullary call is written `a.f` (no `()`).
+- **`.` selects; method args arrive by application.** Selection `a.f` yields a callable; you apply it by juxtaposition `a.f x y` (curried) or with a tuple `a.f (x, y)`. **`(x, y)` is always a single tuple value** (not a Java-style argument list), so `a.f(x, y)` passes *one* argument — the tuple `(x, y)`. A multi-field parameter list `fun f (a: Int, b: Int)` receives and destructures that single tuple; the call `f (1, 2)` looks like Java but passes one value, not two. For two curried args write `a.f x y`; `a.f(x)` ≡ `a.f x` (the parens are grouping). A field or **nullary** method/getter `a.f` is invoked by the selection alone; a non-nullary method named bare (`recv.m` with no args) eta-expands to a closure (§6, §7). A nullary call is written `a.f` (no `()`).
 - **Construction is ordinary application** (v0.3): a constructor `T` is a first-class function, so `T(a)` / `T (a)` are applications, *not* a tighter primary. A field selected directly off a fresh construction therefore needs a chain dot or parentheses — `Point(x=1) .x` or `(Point(x=1)).x` — exactly like `(f x).g` (tight `.` never binds to an application result, §4.3).
 - **Chain selection ` .m` re-threads the accumulated value.** Operationally, after a primary is parsed, a left-to-right loop consumes *application tails*: a bounded argument applies the current callee to one more argument; a ` .m` step makes the accumulated value the **receiver** and selects method/extension `m`, whose subsequent bounded arguments (further tails) become its arguments. This realizes both `foo bar .m` and `3.add 4 .times 5 .neg` as genuinely same-level left-associative.
+
+**General infix-call pattern.** Chain selection `a .m b` is the idiomatic way to call any single-argument method in operator style. The method name is a regular `LOWER_ID`, not an operator token, so there is no need to extend the fixed operator table (§4.1) for new binary operations — library and built-in methods alike use this same form. Examples: `a .or b` (bitwise OR), `a .and b` (bitwise AND), `str .startsWith "Hi"`, `xs .filter pred .map f`. This is why bitwise and shift operations are provided as methods rather than dedicated operator lexemes (§7.15).
 
 **Worked example (normative).**
 
@@ -835,6 +838,7 @@ The modes meet at subsumption: in check mode, synthesize `S`, then require `S <:
 | `Nothing` | `Type.Nothing` | — | bottom; `Nothing <: T` for all `T` |
 
 - **No implicit numeric widening** (`Int → Long`, etc.); conversions are explicit methods (`n.toLong`). *Judgment call*: kept minimal to avoid coercion complexity local inference handles poorly.
+- **Bitwise & shift methods** — All integer primitive types have built-in methods `.and`, `.or`, `.xor`, `.shl`, `.shr`, `.ushr`, `.not` that lower directly to NIR `Op.Bin` nodes (§7.15). These are compiler intrinsics, always available without an import. Following the general chain-selection idiom (§4.2), they are used in operator style: `34 .or 1`, `flags .and mask`, `x .shl 2`.
 - **Boxing**: a primitive used where a reference type is expected (stored in `Array[Object]`, a union, or a generic at a reference type) is boxed to its canonical box class (`java.lang.Integer`, …) per the NIR box/unbox tables; inserted by the elaborator.
 - `String` is the reference type `java.lang.String` (4 fields `value, offset, count, cachedHashCode`). `Array[T]` is `Type.Array(elemTy)`; arrays are built with literals `[e1, …, en]` (§5.6) or runtime allocation, and accessed with the built-in members `xs.get i`, `xs.set i v`, `xs.length` (lowering to `Op.Arrayload`/`Op.Arraystore`/`Op.Arraylength`, §8.9). Indexing sugar `xs[i]` is reserved (§2.2).
 - **`Null` and nullability (surface decision).** MVP reference types are **nullable** (mirroring the backend `Type.Ref.nullable`). `null` arises only from interop/runtime, has type `Null <: R` for every reference type `R`, and dereferencing it throws `NullPointerException` (§7).
@@ -1255,7 +1259,19 @@ fun indexOf (xs: Array[Int]) (x: Int): Int = {
 - **Arithmetic** `+ - * / %` is defined on operands of one matching numeric primitive type (no implicit widening, §6.2). Integer arithmetic wraps (two's complement, JVM-style). Integer `/`/`%` with a zero divisor throws `ArithmeticException`: the backend's `Lower` already inserts the divisor check (`checkDivisionByZero` → `throwDivisionByZero`), so Hi inherits this with no frontend work. Float arithmetic is IEEE-754; `NaN`/`±Inf` propagate and nothing throws.
 - **Relational** `< <= > >=` apply to numeric primitives and `Char` only; they do not chain (§4.1).
 - **Equality `==`/`!=` (judgment call, interim).** On primitives: value comparison (`Op.Comp(Ieq/Feq)`). On value `struct`s: structural field-wise equality (§6.3). On reference types: **null-safe `equals` dispatch** — `a == b` lowers to "if `a` is the null reference, test whether `b` is too; otherwise `Op.Method`-dispatch `java.lang.Object.equals`" (the Scala/Kotlin rule). Reusing javalib means `String` compares by content and box classes by value for free; a class that does not override `equals` inherits identity comparison from `Object`. Auto-derivation of `equals`/`hashCode`/`toString` for classes/records/ADTs remains Open Decision §11.3. Comparing a value type against a reference type is a compile error; reference-*identity* comparison has no operator surface in the MVP.
-- **Bitwise.** Only xor `^` is in the value-operator set; `&`/`|` are type-context-only tokens (§4.1) and there are no shift operators. The bitwise/shift surface is Open Decision §11.8.
+- **Bitwise & shifts** (integer primitives). Provided as built-in chain-selection methods on all integer primitive types, each lowering directly to the corresponding NIR `Op.Bin` node:
+
+  | Method | Operation | NIR `Op.Bin` | Example |
+  |--------|-----------|--------------|---------|
+  | `.and` | bitwise AND | `And` | `34 .and 1` → 0 |
+  | `.or` | bitwise OR | `Or` | `34 .or 1` → 35 |
+  | `.xor` | bitwise XOR | `Xor` | `34 .xor 1` → 35 |
+  | `.shl` | left shift | `Shl` | `1 .shl 8` → 256 |
+  | `.shr` | signed (arithmetic) right shift | `Shr` | `-1 .shr 1` → -1 |
+  | `.ushr` | unsigned (logical) right shift | `Ushr` | `-1 .ushr 1` → `Int.MaxValue` |
+  | `.not` | bitwise NOT (unary) | `Not` | `x .not` flips all bits |
+
+  These methods are recognized by the compiler as intrinsics and are always available on all integer primitive types without an explicit import or extension definition. The `^` operator (level 7) remains available as the infix XOR form on `Int`/`Long`; `.xor` provides an equivalent method-based spelling consistent with `.and`/`.or` across all integer types.
 
 ---
 
@@ -1550,6 +1566,11 @@ object Main {
 
     val s = 3 .show                              // uses impl Show[Int] for Int
     printf "shown = %s\n" [s]
+
+    // bitwise operations via chain-selection methods (§7.15):
+    val flags = 0b0011
+    val mask  = 0b0101
+    printf "or=%d and=%d shl=%d\n" [flags .or mask, flags .and mask, flags .shl 2]
   }
 }
 ```
@@ -1557,11 +1578,13 @@ object Main {
 - `3.add 4 .times 5 .neg` = `-35`: each whitespace-preceded `.` re-threads the accumulated result as the next receiver (§4.2). `add`/`times`/`neg` resolve as extensions on `Int`.
 - `neg` is a **nullary** extension getter (`fun neg: Int = …`, zero parameter lists): always saturated, used as a zero-arg chain step yielding `Int`, never a closure.
 - `3 .show` (or tight `3.show` — identical here, the receiver is a primary) exercises `impl Show[Int] for Int`.
+- `flags .or mask` and `flags .and mask` use the built-in bitwise methods on `Int` (§7.15), following the same chain-selection pattern as `add`/`times` — any single-argument method works as a binary operator via `a .method b` (§4.2).
 - Output:
   ```
   chain = -35
   chain2 = -35
   shown = Int(...)
+  or=7 and=1 shl=12
   ```
 
 ### 9.5 Reference class with inheritance vs. struct
@@ -1807,7 +1830,7 @@ The following are genuine choices still left to the language designer. (Items th
 
 7. **Cross-unit canonical-record hashing collisions.** §8.6 derives record class names from a hash of the sorted signature; the hash width and collision-resolution policy (fall back to full mangled signature on collision?) is left to the implementer.
 
-8. **Bitwise and shift operators.** The value-operator set has xor `^` but no bitwise and/or/shifts, because `&` and `|` are type-context-only tokens (§4.1). Candidates: word-named extension methods on the integer types (`band`/`bor`/`shl`/`shr`/`ushr`, OCaml-style) or new operator lexemes slotted into the §4.1 table. Needed before serious `Ptr`/flags/bit-manipulation code is writable.
+8. ~~**Bitwise and shift operators.**~~ **Decided.** The bitwise/shift surface uses built-in chain-selection methods on all integer primitive types — `.and`, `.or`, `.xor`, `.shl`, `.shr`, `.ushr`, `.not` (§7.15) — rather than new operator lexemes. This avoids extending the fixed operator set with tokens that parse ambiguously alongside type-level `|`/`&` and follows the general idiom that any single-argument method is usable as a binary operator via chain selection `a .method b` (§4.2).
 
 ---
 
@@ -1817,6 +1840,8 @@ The following are genuine choices still left to the language designer. (Items th
 
 ### v0.3 (from v0.2)
 
+- **Bitwise & shift methods on integer primitives.** Bitwise AND/OR/XOR/NOT, left/right/unsigned-right shift are provided as built-in chain-selection methods `.and`/`.or`/`.xor`/`.not`/`.shl`/`.shr`/`.ushr` on all integer primitive types, rather than adding new operator lexemes that would parse ambiguously with type-level `|`/`&`. Chain selection `a .method b` is documented as the general operator-style calling convention for any single-argument method. (§4.1, §4.2, §6.2, §7.15, §9.4, §11.8)
+- **Clarify multi-field param list call model.** `fun f (a: Int, b: Int)` receives and destructures a single tuple argument; `f (1, 2)` passes one value, not two — parens always build a single tuple. (§4.2)
 - **OCaml-style application & first-class constructors.** Parentheses are no longer whitespace-significant — `f(x, y)` ≡ `f (x, y)` applies `f` to the *tuple* `(x, y)`, while curried juxtaposition `f x y` is unchanged. Constructors are ordinary **first-class functions** (`map Some`, `val mk = Node`, `Node a`); the level-2 construction special case is gone, so a constructed value used as a juxtaposed argument or selected from needs parentheses or a chain dot (`f (Point(x=1))`, `(Point(x=1)).x` or `Point(x=1) .x`) — exactly as for any application result. Closures take a parenthesized, optionally-typed parameter list `{ (x: Int, y: String) => e }` and stay uncurried (one `FunctionN`, tuple-applied). (§4, §5.4, §7.6)
 - **ADT payloads use parentheses, not `of`.** `type Option[A] = | Some(A) | None`, `| Node(left: Tree, value: A, right: Tree)` — positional `C(T…)` or named `C(f: T, …)`, mirroring construction and struct/class fields; the `of` keyword is removed. (§5.3, §6.7)
 - **Postfix `match`.** The scrutinee comes first — `e match { | … }` (Scala-style), a lowest-precedence postfix. It reads naturally after method chains (`xs.map f match { … }`) and removes the cramped adjacent-brace case when the scrutinee ends in a callback. `match` becomes a continuation keyword (a line-leading `match` joins the previous line); `try e catch { … }` is unchanged. (§4.1, §5.4, §7.5)
