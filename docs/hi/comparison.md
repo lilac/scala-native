@@ -17,21 +17,22 @@ Hi targets the **GC + native-AOT** quadrant (Go's quadrant) but aims to be far m
 
 ## 2. The part everyone asks about: traits, instances, and dispatch
 
-Hi deliberately has **one** keyword for each distinct idea, and **no `impl`**. Rust's `impl Trait for Type` and Scala 3's `given` both solve "make a type satisfy a trait," and Hi found that `given` strictly dominates: it also does *conditional* instances and *value/primitive* types uniformly, which `impl` cannot. So Hi keeps `given` and drops `impl`. Trait satisfaction then splits cleanly along the axis that actually matters — **do you own the type, and do you need static or dynamic dispatch?**
+Hi's traits are **Self-based** (like Rust/Swift/Java): a trait has an implicit conforming type `Self` plus zero or more *auxiliary* type parameters (element/output types). And there is **no `impl`**: Rust's `impl Trait for Type` and Scala 3's `given` both make a type satisfy a trait, and `given` strictly dominates (it also does *conditional* instances and *value/primitive* types). So Hi keeps `given` and drops `impl`. Conformance then splits along the axis that matters — **do you own the type, and do you need static or dynamic dispatch?**
 
 ### The four axes
 
-| Mechanism | Use it for | Dispatch | Owns the type? | Hi keyword |
+| Mechanism | Use it for | Dispatch | Owns the type? | Hi spelling |
 |---|---|---|---|---|
-| **Nominal conformance** | "I'm defining this type; it implements these traits" | **Dynamic** (itable) | Yes | `class C <: Show` |
-| **Typeclass instance** | "Make a type I don't own (or a primitive/value type) satisfy a trait; conditional instances" | **Static** (dictionary) | No | `given Show[Int] { … }` |
+| **Nominal conformance** | "I'm defining this type; it conforms to these traits" | **Dynamic** (itable) | Yes | `class C <: Show` |
+| **Retroactive instance** | "Make a type I don't own (or a primitive/value type) conform; conditional instances" | **Static** (dictionary) | No | `given Show for Int { … }` |
 | **Extension methods** | "Add `.helper` syntax to a type — no trait, no conformance" | **Static** (direct call) | No | `extension (x: T) { … }` |
-| **Existential trait object** *(deferred — [§2.2](spec.md))* | "A `List[dyn Show]` of mixed payloads I don't own, dispatched per element" | **Dynamic** (carried dictionary) | No | `dyn Show` |
+| **Existential trait object** *(deferred — [§2.2](spec.md))* | "A `List[Dyn[Show]]` of mixed payloads I don't own, dispatched per element" | **Dynamic** (carried dictionary) | No | `Dyn[Show]` |
 
-Two rules make this coherent:
+Three rules make this coherent:
 
-1. **`.m` resolution is a fixed three-tier lookup** ([spec §6.10](spec.md)): (1) a real member / itable method → (2) an in-scope `extension` → (3) a trait method witnessed by an in-scope `given`. Members beat extensions beat typeclass methods; ambiguity *within* a tier is an error. So `3 .show` works when `given Show[Int]` is in scope, with a defined meaning and no magic.
-2. **Coherence is closed-world.** At most one `given` per `(Trait, type-head)` across the whole link — the one real guarantee Rust's `impl` provided, recovered for free because Hi links closed-world.
+1. **`.m` resolution is a fixed three-tier lookup** ([spec §6.10](spec.md)): (1) a real member / itable method → (2) an in-scope `extension` → (3) a trait method via an in-scope conformance (`given … for …` or a `[A: Trait]` bound). Members beat extensions beat trait methods; ambiguity *within* a tier is an error. So `3 .show` works when `given Show for Int` is in scope.
+2. **Resolution is scope-based (Scala's model).** A `[A: Trait]` bound is met by the unique most-specific conformance **in scope**; a same-specificity tie is an ambiguity error *at the use site*. Hi does **not** force one conformance per `(Trait, type)` across the link — you can have two `Ord for Int`s (ascending and descending) and pick by scope, exactly as in Scala/Scala Native. (Trade-off — instances can diverge across scopes — [spec §6.10](spec.md), accepted for the flexibility.)
+3. **Nominal and typeclass paths interoperate.** `class Dog <: Show` binds `Self = Dog` and also **supplies a definition-site `given`**, so an owned type satisfies a `[A: Show]` bound with no extra instance written (a local `given` may coexist and win by scope). Bare `Show` as a *type* (`Array[Show]`) is the nominal existential — reference conformers, each carries its own itable, **no box**; `Dyn[Show]` is the separate, **boxed** form for *retroactive*/value conformers. Because the conformer is `Self` (never a parameter), the parameter wildcard `Collection[?]` and the conformer existential `Dyn[Show]` never collide. ([spec §6.10](spec.md))
 
 ### Why not just copy Swift?
 
@@ -40,9 +41,9 @@ Swift's single `extension` keyword does **both** "add methods" and "declare prot
 Hi still gets Swift's useful feature — **protocol-extension default methods** — but through plain concrete trait members:
 
 ```hi
-trait Ord[A] {
-  fun lt  (self: A) (o: A): Bool                 // abstract requirement (no body)
-  fun gte (self: A) (o: A): Bool = !(self .lt o)  // default method (has a body)
+trait Ord {
+  fun lt  (self) (o: Self): Bool                 // abstract requirement (no body)
+  fun gte (self) (o: Self): Bool = !(self .lt o)  // default method (has a body)
 }
 ```
 
@@ -54,44 +55,51 @@ A bodiless `fun` is abstract; a `fun` with a body in a trait is a default. Both 
 
 ### Rust
 
+Hi's Self-based traits map almost 1:1 onto Rust (implicit `Self`, generic params are auxiliary).
+
 | Rust | Hi | Notes |
 |---|---|---|
-| `trait Show { … }` | `trait Show[A] { fun show (self: A): String }` | trait gains an explicit self-type param |
-| `impl Show for Foreign` | `given Show[Foreign] { … }` | retroactive → dictionary |
+| `trait Show { fn show(&self) -> String }` | `trait Show { fun show (self): String }` | implicit `Self`, like Rust |
+| `impl Show for Foreign` | `given Show for Foreign { … }` | retroactive → dictionary |
 | `impl Show for MyType` (you own it) | `class MyType <: Show { … }` | nominal → real itable |
-| `impl<A: Show> Show for Vec<A>` | `given showList[A] (using Show[A]): Show[List[A]] = …` | conditional instance |
-| `fn f<T: Show>(x: T)` | `fun f[A] (x: A) (using Show[A])` | **no** context bound; explicit `using` |
-| `dyn Show` / `Box<dyn Show>` | `dyn Show` *(deferred)* — meanwhile hand-roll (§4) | existential = value + dictionary |
+| `impl<A: Show> Show for Vec<A>` | `given [A: Show] Show for List[A] { … }` | conditional instance |
+| `fn f<T: Show>(x: T)` | `fun f[A: Show] (x: A)` | trait bound `[A: Show]` |
+| `trait Into<B> { fn into(self) -> B }` | `trait Convert[B] { fun convert (self): B }` | `Self` = source, `B` = target |
+| `dyn Show` / `Box<dyn Show>` | `Dyn[Show]` *(deferred)* — meanwhile hand-roll (§4) | existential = value + dictionary |
+| `&dyn (A + B)` | `Dyn[A & B]` | multi-trait object via intersection |
 | `enum E { A, B(i32) }` | `type E = \| A \| B(Int)` | ADT |
 | `match` | `e match { \| pat => … }` | **postfix**; braces delimit arms |
 | ownership / borrow / lifetimes | — | GC; no borrow checker |
 | `Result` / `?` | `throw` / `try e catch { … }` | exceptions, not result types |
 
-The key reframe: Rust's `dyn Trait` is **not** a method added to the foreign type's vtable — it's a fat pointer `(data, vtable)` where the vtable is attached at the coercion. That's dictionary passing. Hi already has the dictionary (`given`); `dyn` is just the box.
+The key reframe: Rust's `dyn Trait` is **not** a method added to the foreign type's vtable — it's a fat pointer `(data, vtable)` where the vtable is attached at the coercion. That's dictionary passing. Hi already has the dictionary (`given`); `Dyn[Show]` is just the box.
 
 ### Swift
 
+Also Self-based (`Self`/protocols), so it maps directly too.
+
 | Swift | Hi | Notes |
 |---|---|---|
-| `protocol P { … }` | `trait P[A] { … }` | |
-| `extension Foreign: P {}` (conformance) | `given P[Foreign] { … }` | **split**: conformance ≠ helper methods |
+| `protocol P { … }` | `trait P { … }` | implicit `Self` both sides |
+| `extension Foreign: P {}` (conformance) | `given P for Foreign { … }` | **split**: conformance ≠ helper methods |
 | `extension T { func helper() … }` | `extension (x: T) { fun helper () … }` | helper methods only, always static |
 | protocol-extension default | concrete trait member `fun m (self) = …` | no dispatch gotcha |
-| `any P` | `dyn P` *(deferred)* | boxed existential |
-| `some P` (opaque return) | `fun f[A] … (using P[A])` | generic + `using` |
+| `any P` | `Dyn[P]` *(deferred)* | boxed existential |
+| `some P` (opaque return) | `fun f[A: P]` | generic + trait bound |
 | `struct` (value) / `class` (ref) | `struct` / `class` | same split; Hi structs can't hold managed refs in MVP ([§6.3](spec.md)) |
 | `enum` with associated values | `type E = \| …` | ADT |
 | `T?` optionals | `Option[T]` | ADT, no special `?` sugar |
 
 ### Scala 3
 
-Closest relative — most things map 1:1.
+Close relative for syntax, but Hi's traits are **Self-based** (Rust/Swift style), not Scala's parameter-based typeclasses — so conformance maps to `<:`/`given … for …` rather than `Show[A]` instances.
 
 | Scala 3 | Hi | Notes |
 |---|---|---|
-| `given Show[Int] with { … }` | `given Show[Int] { … }` | drop `with` |
-| `given f[A](using Show[A]): Show[List[A]] = …` | `given f[A] (using Show[A]): Show[List[A]] = …` | same idea |
-| `def f[A](x: A)(using Show[A])` | `fun f[A] (x: A) (using Show[A])` | `def` → `fun` |
+| `trait Show[A] { def show(x: A): String }` (typeclass) | `trait Show { fun show (self): String }` | conformer is `Self`, not a param |
+| `given Show[Int] with { … }` | `given Show for Int { … }` | `for` names the conformer |
+| `given f[A](using Show[A]): Show[List[A]] = …` | `given [A: Show] Show for List[A] { … }` | conditional instance |
+| `def f[A: Show](x: A)` / `(using Show[A])` | `fun f[A: Show] (x: A)` | trait bound; `def` → `fun` |
 | `extension (x: T) def m = …` | `extension (x: T) { fun m () = … }` | braced body, `fun` members |
 | `extension (x: A)(using Show[A]) def …` | *(deferred — [§2.2](spec.md))* | use a trait member instead |
 | `trait` / `sealed trait` + `case`s | `trait` / `type E = \| …` | ADTs are a `type` with leading `\|` |
@@ -107,32 +115,32 @@ Closest relative — most things map 1:1.
 
 ---
 
-## 4. Worked example: retroactive dynamic dispatch (pair-by-hand → `dyn`)
+## 4. Worked example: retroactive dynamic dispatch (pair-by-hand → `Dyn[Show]`)
 
-The one capability that *seems* lost by dropping `impl` is "dynamically dispatch a method on a type I don't own, in a heterogeneous collection." You don't lose it — it's an **existential**, and every language implements it the same way: pair each value with a witness dictionary. Hi will spell that `dyn Trait`; until it ships, you build the pair by hand.
+The one capability that *seems* lost by dropping `impl` is "dynamically dispatch a method on a type I don't own, in a heterogeneous collection." You don't lose it — it's an **existential**, and every language implements it the same way: pair each value with a witness dictionary. Hi will spell that `Dyn[Trait]`; until it ships, you build the pair by hand.
 
-### Before `dyn` — pair by hand
+### Before `Dyn[Show]` — pair by hand
 
 ```hi
 package examples.dynshow
 
 import std.io.printf
 
-trait Show[A] { fun show (self: A): String }
+trait Show { fun show (self): String }            // Self-based: Self = the conformer
 
-given Show[Int]  { fun show (self: Int):  String = "an Int"  }
-given Show[Bool] { fun show (self: Bool): String = "a Bool" }
+given Show for Int  { fun show (self): String = "an Int"  }
+given Show for Bool { fun show (self): String = "a Bool" }
 
 // A hand-rolled existential: this class has *forgotten* its payload's type,
 // keeping only a thunk that closed over (value, dictionary) while both were known.
 class AnyShow (render: Unit -> String) {
-  fun show (self: AnyShow): String = self.render ()
+  fun show (self): String = self.render ()
 }
 
-// Factory: at the call site A and its `given Show[A]` are both in scope,
+// Factory: at the call site A and its `Show` conformance are both in scope,
 // so we can capture them before A is erased.
-fun anyShow[A] (x: A) (using s: Show[A]): AnyShow =
-  AnyShow(render = { u => s.show x })
+fun anyShow[A: Show] (x: A): AnyShow =
+  AnyShow(render = { u => x.show })
 
 object Main {
   fun main (args: Array[String]): Unit = {
@@ -146,23 +154,23 @@ object Main {
 }
 ```
 
-The closure `{ u => s.show x }` captures both the value `x` and the resolved dictionary `s`. Each `AnyShow` is a uniform reference type, so `Array[AnyShow]` is fine, and `xs.get i .show` calls through the captured dictionary. This is exactly a `Box<dyn Show>` / `any Show` — built explicitly. *(Iterating by index with `.length`/`.get` because the fluent collections API, including `Array.foreach` and `for … in` over arrays, is deferred to the collections milestone — [§2.2](spec.md).)*
+The closure `{ u => x.show }` captures the value `x` and (via the `[A: Show]` bound) its resolved dictionary. Each `AnyShow` is a uniform reference type, so `Array[AnyShow]` is fine, and `xs.get i .show` calls through the captured dictionary. This is exactly a `Box<dyn Show>` / `any Show` — built explicitly. *(Iterating by index with `.length`/`.get` because the fluent collections API, including `Array.foreach` and `for … in` over arrays, is deferred to the collections milestone — [§2.2](spec.md).)*
 
-### After `dyn` — compiler-synthesized
+### After `Dyn[Show]` — compiler-synthesized
 
 ```hi
 package examples.dynshow
 
 import std.io.printf
 
-trait Show[A] { fun show (self: A): String }
+trait Show { fun show (self): String }
 
-given Show[Int]  { fun show (self: Int):  String = "an Int"  }
-given Show[Bool] { fun show (self: Bool): String = "a Bool" }
+given Show for Int  { fun show (self): String = "an Int"  }
+given Show for Bool { fun show (self): String = "a Bool" }
 
 object Main {
   fun main (args: Array[String]): Unit = {
-    val xs: Array[dyn Show] = [ 3, true, 7 ]   // each element boxed with its given automatically
+    val xs: Array[Dyn[Show]] = [ 3, true, 7 ]   // each element boxed with its given automatically
     var i = 0
     while i < xs.length do {
       printf "%s\n" [xs.get i .show]            // dynamic dispatch through the carried dictionary
@@ -172,18 +180,18 @@ object Main {
 }
 ```
 
-`dyn Show` is the existential `AnyShow` was emulating: each element is packed with its `given Show[…]` at the coercion (the array literal — packing is **implicit and type-directed**, no `as` cast, driven by the expected `dyn Show`), and `.show` dispatches through the carried dictionary. It lowers to a synthesized class holding payload + dictionary — **no new NIR**, same machinery you wrote by hand.
+`Dyn[Show]` is the existential `AnyShow` was emulating: each element is packed with its `given Show for …` at the coercion (the array literal — packing is **implicit and type-directed**, no `as` cast, driven by the expected `Dyn[Show]`), and `.show` dispatches through the carried dictionary. It lowers to a synthesized class holding payload + dictionary — **no new NIR**, same machinery you wrote by hand.
 
-Don't reach for `dyn` when you own the types — a bare trait-as-type is plain nominal subtyping and already works:
+Don't reach for `Dyn[Show]` when you own the types — a bare trait-as-type is plain nominal subtyping and already works:
 
 ```hi
-class Dog (name: String) <: Show { fun show (self) = "Dog" }
-class Cat (name: String) <: Show { fun show (self) = "Cat" }
+class Dog (name: String) <: Show { fun show (self): String = "Dog" }
+class Cat (name: String) <: Show { fun show (self): String = "Cat" }
 
-val pets: Array[Show] = [ Dog("rex"), Cat("tom") ]   // no dyn, no box — each carries its own itable
+val pets: Array[Show] = [ Dog("rex"), Cat("tom") ]   // no Dyn, no box — each carries its own itable
 ```
 
-`Array[Show]` holds values that conform via `<:` (zero packing, dispatch through each value's itable). `Array[dyn Show]` is only for *retroactive* instances (`given Show[Int]`), where the value isn't a `Show` subtype and must be boxed with its dictionary. Two types, two representations — kept distinct on purpose (the reason Swift moved from an implicit `[Show]` existential to an explicit `any`).
+`Array[Show]` holds values that conform via `<:` (zero packing, dispatch through each value's itable). `Array[Dyn[Show]]` is for *retroactive* conformers (`given Show for Int`) and value/primitive types, where the value isn't a `Show` subtype and must be boxed with its dictionary. Two types, two representations — kept distinct on purpose (the reason Swift moved from an implicit `[Show]` existential to an explicit `any`); `Dyn[…]` makes the box visible. And because the conformer is `Self` (never a type parameter), a future parameter wildcard `Collection[?]` lives in a different slot and never clashes with `Dyn` — they even compose (`Dyn[Collection[?]]`).
 
 ---
 
