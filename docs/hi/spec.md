@@ -235,18 +235,20 @@ run tasks
 ```
 val   var   do   return   fun   object   trait   type   struct   class
 extension   given   using   with   if   then   else   match   import   package
-throw   try   catch   while   for   in   true   false
+throw   try   catch   while   for   in   true   false   self   static
 ```
 
 - `val`/`var` — immutable / mutable local binding; `fun` — function declarations. Statements are newline-terminated (§3.4) and any expression may stand as a statement.
 - `return` — **early exit** from the enclosing `fun` with the given value (`()` if omitted); type `Nothing` (§7.13). It never exits merely a block, and may not cross a closure boundary in the MVP.
 - `while c do e` / `for x in e do body` — loops (§7.12); **`do` introduces a loop body** (its only role).
 - `class`/`struct` — reference/value split. `struct` is a by-value aggregate restricted to primitives, `Ptr`, and nested such structs. A `class`/`object` declares the traits it conforms to *nominally* in its `<:` clause (§5.3), binding `Self` to itself; there is **no** `impl` keyword — retroactive conformance is `given Trait for Type` (§6.10).
-- `extension` — `extension (x: T) { ... }`.
+- `extension` — `extension T { ... }` (receiver is the implicit `self`, §5.3).
 - `given`/`using` — `given Trait for Type` declares a retroactive conformance (a dictionary); `using` introduces a general contextual parameter (typeclass requirements are normally the `[A: Trait]` bound, §5.3, §6.10). `for` (also the loop keyword) names the conforming type in a `given`.
 - `with` — functional update `base with (...)` only (records/structs, §6.6). Parent lists use commas (`<: A, B`, §5.3); `match` arms live in a braced arm-block (§5.4). Neither uses `with`.
 - `throw`/`try`/`catch` — the only error-handling forms: `try e catch { | P => h … }` (§7.11).
 - `true`/`false` — boolean literals lexed as keywords.
+- `self` — the implicit receiver (the current instance/conformer) inside a `trait`/`class`/`struct`/`extension`/`given … for …` body (§5.3); `Self` (UPPER_ID) is its type. Methods do not declare a receiver parameter (Scala/Swift style).
+- `static` — marks an associated (no-receiver) trait/class member, e.g. `static fun empty: Self` (§5.3); called type-qualified `T.empty` (§6.10).
 
 > **Note.** `new` is **not** a keyword. Construction is constructor application `T(...)` (§7.7); there is no `new`.
 
@@ -492,7 +494,7 @@ param_list  ::= "(" sepBy(param, ",") ")"
 param       ::= "using"? LOWER_ID type_ann? ( "=" expr )?
 ```
 
-- **Body optional ⇒ abstract vs. concrete.** A `fun` *with* a `= expr` body is a concrete definition (`Defn.Define`); a `fun` *without* a body is an **abstract member** (`Defn.Declare`) and requires an explicit return type. An abstract `fun` is legal **only** as a `trait` member; a bodiless `fun` anywhere else (top level, `class`/`struct`/`object` body, block) is a compile error. A *concrete* `fun` in a `trait` is a **default method** — inherited by every implementor unless overridden — and dispatches through the same mechanism as any other trait member (no Swift-style "extension method dispatches statically" split, §6.10). This is what lets `trait Show { fun show (self): String }` declare an abstract member while `trait Ord { fun lt (self) (o: Self): Bool;  fun gte (self) (o: Self): Bool = !(self .lt o) }` mixes an abstract requirement with a default.
+- **Body optional ⇒ abstract vs. concrete.** A `fun` *with* a `= expr` body is a concrete definition (`Defn.Define`); a `fun` *without* a body is an **abstract member** (`Defn.Declare`) and requires an explicit return type. An abstract `fun` is legal **only** as a `trait` member; a bodiless `fun` anywhere else (top level, `class`/`struct`/`object` body, block) is a compile error. A *concrete* `fun` in a `trait` is a **default method** — inherited by every implementor unless overridden — and dispatches through the same mechanism as any other trait member (no Swift-style "extension method dispatches statically" split, §6.10). This is what lets `trait Show { fun show: String }` declare an abstract member while `trait Ord { fun lt (o: Self): Bool;  fun gte (o: Self): Bool = !(self .lt o) }` mixes an abstract requirement with a default (the receiver is the implicit `self`).
 - `param_list*` realizes both multiple parameter lists (`fun f (a) (b) = …`) **and the nullary form** (`fun neg: Int = …`, zero lists). A nullary `fun` is a 0-ary method/getter: it is always *saturated* and is invoked by selection (`x.neg`, `x .neg`) — it never eta-expands.
 - An **empty parameter list** `()` declares exactly **one parameter of type `Unit`** (the OCaml convention): `fun ping (): Unit = …` is unary and is saturated by applying the Unit literal — `ping ()`. This is distinct from the zero-list nullary getter above; without this rule, `f ()` (application to the bounded argument `()`) could never saturate a "zero-parameter" list.
 - A `using`-marked parameter (or a whole trailing list of them) is a contextual parameter, filled by `given` search (§6.11).
@@ -500,12 +502,14 @@ param       ::= "using"? LOWER_ID type_ann? ( "=" expr )?
 
 #### Receiver convention for methods (`self`)
 
-Hi traits are **Self-based** (§6.10): every trait has an implicit, distinguished conforming type **`Self`** — the receiver — plus zero or more *auxiliary* type parameters (element/output types). Inside a `trait`, `class`, `struct`, or braced/`for` `given` body, a method takes its receiver as an explicit first parameter named `self`, whose type is **`Self`**.
+Hi traits are **Self-based** (§6.10): every trait has an implicit, distinguished conforming type **`Self`** — the receiver — plus zero or more *auxiliary* type parameters (element/output types). The receiver is **implicit** (Scala/Swift style): an instance method does **not** declare it; inside the body the receiver is the keyword **`self`** (of type `Self`), and bare member access (`name`, `m x`) resolves against it.
 
-- **`self` is the one parameter exempt from the §6.1 annotation requirement** and defaults to `Self`: `fun show (self): String` ≡ `fun show (self: Self): String`. Inside `class Dog`, `Self = Dog`; inside `trait Show`, `Self` is the abstract conformer; inside `given Show for Int`, `Self = Int`. Bare `self` is the **idiomatic** spelling; the annotation is rarely needed.
-- **`Self` is a usable type name** (a reserved built-in, UPPER_ID) inside any trait/class/struct/given body, denoting the conforming/enclosing type. It appears in non-receiver positions too: `trait Ord { fun lt (self) (o: Self): Bool }`, `trait Monoid { fun empty: Self;  fun combine (self) (o: Self): Self }`.
-- **A member may omit `self`** to become an *associated* (static) member with no receiver — `empty: Self` above — reachable only through a conformance (a `[A: Monoid]` bound or a `given`, §6.10). It is called **type-qualified**: `A.empty` (or `Int.empty` for a concrete type), which the elaborator resolves through the in-scope conformance — the analogue of Rust's `Money::empty()`. (A value receiver cannot supply it: there may be no value, as in `empty`.)
-- **Auxiliary parameters are never the conformer.** `trait Collection[T] { fun size (self): Int;  fun get (self) (i: Int): T }` has `Self` = the collection and `T` = the element type; `trait Convert[B] { fun convert (self): B }` has `Self` = the source, `B` = the target. Extension methods do not use `self`; their receiver is bound by the `extension` header.
+- **Instance methods omit the receiver.** `fun show: String`, `fun lt (o: Self): Bool`, `fun get (i: Int): T` — the only parameter lists are the *explicit* arguments. Inside the body, `self : Self` is in scope: `fun gte (o: Self): Bool = !(self .lt o)`. Write `self` for disambiguation or to pass the whole receiver; otherwise bare access works (`fun show: String = name` ≡ `… = self.name`).
+- **`self` is a keyword** (the current instance/conformer), and **`Self`** is a reserved built-in type name (UPPER_ID) for the conforming/enclosing type. Inside `class Dog`, `self : Dog`; inside `trait Show`, `Self` is the abstract conformer; inside `given Show for Int`, `self : Int`. `Self` also appears in non-receiver positions: `fun lt (o: Self): Bool`, `fun combine (o: Self): Self`.
+- **Associated (no-receiver) members are marked `static`.** A member that has no instance — typically a constructor-like value — is written `static fun empty: Self` (Swift's `static func`). Since the receiver is implicit, `static` (not the absence of a `self` parameter) is what marks "type-level, no `self`". It is called **type-qualified** — `A.empty` (or `Int.empty`) — resolved through the in-scope conformance (a `[A: Monoid]` bound or a `given`, §6.10), the analogue of Swift's `T.empty` / Rust's `T::empty()`.
+- **Auxiliary parameters are never the conformer.** `trait Collection[T] { fun size: Int;  fun get (i: Int): T }` has `Self` = the collection and `T` = the element; `trait Convert[B] { fun convert: B }` has `Self` = the source, `B` = the target. Extension methods likewise use the implicit `self` (their receiver is the extended type, §5.3 `extension`).
+
+> **Why the receiver is implicit (Scala/Swift, not Rust-style explicit `self`).** Hi is **OO-native** and draws its surface from Scala, OCaml, and Swift — all of which take the receiver implicitly (`this`/`self`), giving clean interface-style signatures `fun show: String`. An explicit first `self` parameter (Rust/Go/Python) was considered and rejected: it reads less like the OO interfaces Hi wants to make easy, and the one thing it bought for free — using the *absence* of a `self` parameter to mark an associated member — is recovered with the `static` keyword (a small, familiar cost). The receiver still lowers to the first NIR parameter (§8.1); only the source omits it. Full discussion in [traits-design.md](traits-design.md).
 
 > **Why Self-based (and why we switched in v0.5).** Earlier versions made traits **parameter-based** (`trait Show[A]`, the conformer is a type parameter, Haskell/Scala-typeclass style). That choice forced a pile of reconciliation machinery (an F-bound sugar `<: Show[Self]`, `[?]`/`[*]` existential markers, a self-default rule that contradicted itself for parameterized interfaces like `Collection[T]`) and — decisively — it **cannot** coexist with two roadmap features. Hi wants *both* Java/Scala **parameter wildcards** (`Collection[?]` = "a collection of some element") *and* Rust/Swift **trait-object existentials** (`Dyn[Show]` = "some value that is a Show, boxed"). The first quantifies a *parameter*; the second quantifies the *conformer*. If the conformer **is** a parameter (`Show[A]`), then `Show[?]` is ambiguous between the two — a structural collision no spelling can fix. Making the conformer the implicit `Self` (not a parameter) puts the two quantifications in **different syntactic slots** — `?` ranges over auxiliary parameters, `Dyn[…]` over `Self` — so they never collide and compose freely (`Dyn[Collection[?]]`). Self-based also makes `Collection[T]` unambiguously an interface (the `T`-is-element question never arises), matches the OO intuition (the value carries its own methods), maps directly onto the backend's itables for nominal dispatch, and still expresses associated members (`empty: Self`) and multi-type relations (`Convert[B]`). The cost — symmetric multi-parameter type classes with no privileged `Self` (Haskell MPTCs) — is deferred (pick one type as `Self` plus auxiliary params, as Rust does). The full design discussion — alternatives explored and rejected, the forcing argument, and the parameter-based migration map — is in [traits-design.md](traits-design.md).
 
@@ -552,7 +556,7 @@ class_body  ::= "{" items_block "}"
 trait_decl    ::= "trait" UPPER_ID type_params? trait_parents? "{" items_block "}"
 trait_parents ::= "<:" sepBy1(type, ",")
 
-extension_decl ::= "extension" type_params? "(" LOWER_ID ":" type ")" "{" ext_member* "}"
+extension_decl ::= "extension" type_params? type "{" ext_member* "}"   // 'extension Int { … }'; receiver is implicit `self`
 ext_member     ::= fun_decl                            // self-delimiting (keyword-introduced); no separator
 
 given_decl    ::= "given" given_name? type_params? type ( "for" type )? given_body
@@ -569,17 +573,17 @@ A `given` has two forms, split by the optional `for` clause:
 - **Without `for` — a plain contextual value.** `given Type given_body` provides a value of `Type` to satisfy a `using Type` parameter (§6.10). This is the general (non-typeclass) contextual mechanism; it carries no `Self`.
 
 ```hi
-given Show for Int { fun show (self): String = "…" }     // conformance, with members (Self = Int)
+given Show for Int { fun show: String = "…" }            // conformance, with members (self : Int)
 given Eq for Int = intEq                                  // conformance, binding an existing dictionary
 given descOrd: Ord for Int { … }                          // named conformance, for scope selection (§6.10)
 given [A: Show] Show for List[A] { … }                    // conditional conformance: requires Show for A
-given Convert[String] for Int { fun convert (self): String = … }   // auxiliary trait arg + for-type
+given Convert[String] for Int { fun convert: String = … }   // auxiliary trait arg + for-type (self: Int)
 given Config = defaultConfig                              // plain contextual value (no `for`) for `using c: Config`
 ```
 
 The optional `type_params` carry conditional constraints (`[A: Show]`); the optional `given_name` lets two conformances for the same pair be distinguished and scope-selected (§6.10). `for` reuses the existing keyword (no ambiguity: it follows a trait type inside a `given`, never a loop here). The parser commits to the conformance form on seeing a depth-0 `for` before `given_body`, otherwise to the plain-value form (bounded lookahead).
 
-An `extension` body holds only `fun` members (no `val`): an extension adds no storage to the receiver's type, so a "computed property" is just a nullary getter `fun sign: Int = …` (§5.3 receiver convention; invoked by selection, §4.2). The extension's receiver binder (`(n: Int)`) plays the role `self` plays in a `trait`/`class` body.
+An `extension Type { … }` body holds only `fun` members (no `val`): an extension adds no storage to the receiver's type, so a "computed property" is just a nullary getter `fun sign: Int = …` (invoked by selection, §4.2). The receiver is the implicit `self` of the extended `Type` (Swift's `extension T { … self … }`), exactly as in a `trait`/`class` body — e.g. `extension Int { fun double: Int = self + self }`.
 
 The entry point is an `object_decl` named `Main` whose body declares `fun main (args: Array[String]): Unit = …` (a linker convention, not special grammar). **Object/module-level `var` fields are rejected in MVP** (§2, §6).
 
@@ -841,7 +845,7 @@ The modes meet at subsumption: in check mode, synthesize `S`, then require `S <:
 |---|---|---|
 | Top-level / public `fun` parameter types | **Required** | Signatures are the inference boundary. |
 | Top-level / public `fun` return type | **Required** | Each definition checkable in isolation; no cross-module body inference. |
-| The receiver parameter `self` | **Exempt** (defaults to enclosing type; §5.3) | Receiver is structurally determined. |
+| The receiver `self` | **Implicit** (type `Self`, not declared; §5.3) | Receiver is structurally determined. |
 | `struct` / `class` field types | **Required** | Fields define layout/ABI. |
 | `trait` member signatures | **Required** | Interface contract. |
 | `type` alias / ADT constructor argument types | **Required** | Define the nominal shape. |
@@ -1027,22 +1031,22 @@ Hi has **three** abstraction mechanisms — `trait`, `extension`, `given` — wi
 #### `trait` — Self-based interface / typeclass, optionally with default methods
 
 ```hi
-trait Show { fun show (self): String }                  // Self = the conforming type; one abstract member
+trait Show { fun show: String }                         // Self = the conforming type; one abstract member
 trait Ord {
-  fun lt  (self) (o: Self): Bool                        // abstract requirement; Self in arg position
-  fun gte (self) (o: Self): Bool = !(self .lt o)        // default method (concrete body)
+  fun lt  (o: Self): Bool                               // abstract requirement; Self in arg position
+  fun gte (o: Self): Bool = !(self .lt o)               // default method (receiver is the implicit `self`)
 }
-trait Collection[T] { fun size (self): Int;  fun get (self) (i: Int): T }   // Self = collection, T = element
+trait Collection[T] { fun size: Int;  fun get (i: Int): T }   // Self = collection, T = element
 ```
 
-A `trait` is a reference-type interface → `Defn.Trait`. `Self` is the conformer (the `self` receiver's type, §5.3); `[T]` parameters are auxiliary. A **bodiless** member is abstract → `Defn.Declare`; a member **with a body** is a *default method* → `Defn.Define`, inherited by every implementor unless overridden (§5.3). Default methods give Swift "protocol-extension defaults" with **no** Swift-style dispatch split: a trait member dispatches the same way whether or not it has a default — dynamically through the itable when the receiver conforms *nominally* (`<:`), or through the dictionary when *retroactively* (`given`).
+A `trait` is a reference-type interface → `Defn.Trait`. `Self` is the conformer (the implicit `self` receiver's type, §5.3); `[T]` parameters are auxiliary; the receiver is implicit (not declared). A **bodiless** member is abstract → `Defn.Declare`; a member **with a body** is a *default method* → `Defn.Define`, inherited by every implementor unless overridden (§5.3). Default methods give Swift "protocol-extension defaults" with **no** Swift-style dispatch split: a trait member dispatches the same way whether or not it has a default — dynamically through the itable when the receiver conforms *nominally* (`<:`), or through the dictionary when *retroactively* (`given`).
 
 **Two ways a type conforms to a trait:**
 
-- **Nominally, at definition (`<:`) — dynamic dispatch.** A `class`/`object` you own lists its traits in its `<:` clause (§5.3), binding `Self` to the declaring type; methods install into the vtable/itable and a `List[Show]` dispatches per element at runtime. `class Dog <: Show { fun show (self) = "woof" }`; `class LinkedList[T] <: Collection[T] { … }`. The path for types you control.
-- **Retroactively (`given Trait for Type`) — dictionary.** For a type you do *not* own (`Int`, `String`, a foreign class) or a value/primitive type (no header to dispatch through), a `given … for …` supplies the conformance as a compile-time-resolved dictionary, binding `Self` to the `for`-type: `given Show for Int { fun show (self): String = … }`. Uniform across reference, value, and primitive types, and the only mechanism that expresses *conditional* instances (`given [A: Show] Show for List[A]`).
+- **Nominally, at definition (`<:`) — dynamic dispatch.** A `class`/`object` you own lists its traits in its `<:` clause (§5.3), binding `Self` to the declaring type; methods install into the vtable/itable and a `List[Show]` dispatches per element at runtime. `class Dog <: Show { fun show: String = "woof" }`; `class LinkedList[T] <: Collection[T] { … }`. The path for types you control.
+- **Retroactively (`given Trait for Type`) — dictionary.** For a type you do *not* own (`Int`, `String`, a foreign class) or a value/primitive type (no header to dispatch through), a `given … for …` supplies the conformance as a compile-time-resolved dictionary, binding `Self` to the `for`-type: `given Show for Int { fun show: String = … }` (here `self : Int`). Uniform across reference, value, and primitive types, and the only mechanism that expresses *conditional* instances (`given [A: Show] Show for List[A]`).
 
-> **Nominal `<:` also provides the `given` (normative).** A nominal `class Dog <: Show` **synthesizes a definition-site `given Show for Dog`**, so an owned type satisfies a `[A: Show]` bound (below) with no separately-written instance — `render (Dog(...))` resolves. The synthesized dictionary is a stateless singleton whose members forward to the receiver's itable (`show (self) = self.show`, an `Op.Method` virtual dispatch), so nominal dispatch and dictionary dispatch agree by construction. It lives in the type's definition-site scope (always visible, like a Scala companion `given`) and is an ordinary candidate in the scope-based search below; a more-local hand-written `given Show for Dog` may coexist and win by scope (a same-specificity tie at a use site is an ambiguity error). The two conformance paths thus interoperate without a global one-instance rule.
+> **Nominal `<:` also provides the `given` (normative).** A nominal `class Dog <: Show` **synthesizes a definition-site `given Show for Dog`**, so an owned type satisfies a `[A: Show]` bound (below) with no separately-written instance — `render (Dog(...))` resolves. The synthesized dictionary is a stateless singleton whose members forward to the receiver's itable (an `Op.Method` virtual dispatch on the passed `self`), so nominal dispatch and dictionary dispatch agree by construction. It lives in the type's definition-site scope (always visible, like a Scala companion `given`) and is an ordinary candidate in the scope-based search below; a more-local hand-written `given Show for Dog` may coexist and win by scope (a same-specificity tie at a use site is an ambiguity error). The two conformance paths thus interoperate without a global one-instance rule.
 
 #### Typeclass use: `[A: Trait]` bounds
 
@@ -1057,10 +1061,10 @@ render 42                                                 // retroactive `given 
 
 A `[A: Show]` bound desugars to an implicit dictionary parameter (the `Show`-witness for `A`), resolved by the scope-based search below and appended to the flattened NIR parameter list (§8.8) — exactly the lowering older versions gave `using Show[A]`. Inside the bounded scope, `Show`'s members are callable on an `A` value via tier-3 `.m` resolution. (`using` parameters remain for *non-typeclass* contextual values; `[A: Trait]` is the idiomatic spelling for a conformance requirement and replaces the old `using s: Show[A]` form.)
 
-#### `extension (x: T) { ... }` — statically resolved sugar
+#### `extension T { ... }` — statically resolved sugar
 
 ```hi
-extension (n: Int) { fun double (): Int = n + n }
+extension Int { fun double: Int = self + self }
 ```
 
 An extension adds `.method` / ` .method` (chain) syntax to a type **without** declaring any trait conformance — pure additive sugar, **always statically resolved** from the receiver's static type and in-scope extensions, no vtable/itable entry, no dynamic dispatch. `x.double` compiles to a direct static call (§8.7). Keeping conformance *out* of `extension` (unlike Swift, where `extension T: P {}` both adds methods and declares conformance) is what avoids Swift's "is this call static or dynamic?" hazard. Extension bodies hold only `fun` members (§5.3); conditional/typeclass-keyed extension methods are deferred (§2.2) — surface them as trait members instead.
@@ -1090,7 +1094,7 @@ A selection `recv.m` or chain step `recv .m` (§4.2) resolves `m` against the re
 ### 6.11 Summary of compile-time guarantees
 
 - All expressions typed in check/synthesis mode; subsumption uses `<:`.
-- Top-level/public `fun`s, fields, trait members, ctor arg types are annotated; `self` is exempt.
+- Top-level/public `fun`s, fields, trait members, ctor arg types are annotated; the receiver `self` is implicit (type `Self`).
 - `struct` fields are primitives/`Ptr`/nested all-primitive structs only (checked on the declared, unboxed type).
 - Structural-record identity, field presence on `.`, type-preserving update over a fully-known base.
 - ADT `match` exhaustiveness and non-redundancy (errors).
@@ -1471,7 +1475,7 @@ Module access and lazy init are provided by the backend (`Generate.genModuleAcce
 
 ### 8.7 Extension methods → static calls
 
-`extension (x: T) { fun m (a) = ... }` lowers each method to a **static `Defn.Define`** whose first parameter is the receiver `T` (`Sig.Method("m", Seq(T, A, Ret), Sig.Scope.PublicStatic)`). A call `v.m a` or chain `v .m a` lowers to a direct static `Op.Call` — no virtual dispatch, no boxing of the receiver. `3.add 4 .times 5 .neg` lowers to nested calls `neg(times(add(3, 4), 5))`; each step is a static `Op.Call` (extension) or `Op.Method` (class method), never a free-function lookup.
+`extension T { fun m (a) = ... }` lowers each method to a **static `Defn.Define`** whose first parameter is the (elaborator-inserted) receiver `T` (`Sig.Method("m", Seq(T, A, Ret), Sig.Scope.PublicStatic)`); inside the body the implicit `self` *is* that parameter. A call `v.m a` or chain `v .m a` lowers to a direct static `Op.Call` — no virtual dispatch, no boxing of the receiver. `3.add 4 .times 5 .neg` lowers to nested calls `neg(times(add(3, 4), 5))`; each step is a static `Op.Call` (extension) or `Op.Method` (class method), never a free-function lookup.
 
 ### 8.8 Conformance → dictionary passing (`given Trait for Type`, `[A: Trait]` bounds)
 
@@ -1624,18 +1628,18 @@ package examples.chains
 
 import std.io.printf
 
-trait Show {                         // Self-based: Self = the conforming type
-  fun show (self): String
+trait Show {                         // Self-based: Self = the conforming type; receiver implicit
+  fun show: String
 }
 
 given Show for Int {                 // retroactive conformance for a foreign type: dictionary, not vtable
-  fun show (self): String = "Int(...)"
+  fun show: String = "Int(...)"      // self : Int (implicit)
 }
 
-extension (n: Int) {
-  fun add (m: Int): Int = n + m
-  fun times (m: Int): Int = n * m
-  fun neg: Int = 0 - n              // nullary getter: invoked by selection, never eta-expands
+extension Int {                      // implicit `self` of the extended type (Swift style)
+  fun add (m: Int): Int = self + m
+  fun times (m: Int): Int = self * m
+  fun neg: Int = 0 - self           // nullary getter: invoked by selection, never eta-expands
 }
 
 object Main {
@@ -1683,15 +1687,15 @@ package examples.classes
 import std.io.printf
 
 class Animal (name: String) {
-  fun speak (self): String = "..."          // 'self' type defaults to Animal
+  fun speak: String = "..."                 // receiver implicit; `self : Animal` in scope
 }
 
 class Dog (name: String) <: Animal(name) {   // super-ctor call supplies 'name'
-  fun speak (self): String = "woof"
+  fun speak: String = "woof"
 }
 
 class Cat (name: String) <: Animal(name) {
-  fun speak (self): String = "meow"
+  fun speak: String = "meow"
 }
 
 // Value type: copied, no identity; only primitives.
@@ -1714,7 +1718,7 @@ object Main {
 ```
 
 - `rex`/`mimi` typecheck because `Dog <: Animal` and `Cat <: Animal` (subsumption).
-- `speak` is declared `fun speak (self): String` (one self list, nullary in arguments): `rex.speak` is a nullary selection invoked immediately and dispatched dynamically — `woof` / `meow`.
+- `speak` is declared `fun speak: String` (no parameter lists, receiver implicit): `rex.speak` is a nullary selection invoked immediately and dispatched dynamically — `woof` / `meow`.
 - `<: Animal(name)` is a super-constructor call (§5.3, §8.2) supplying `name` to `Animal`'s ctor.
 - `Tally` holds only an `Int`, legal under the value-struct rule; `t0 with (count = …)` builds a fresh `Tally`, and `t0.count` still reads `0`.
 - A `name: String` field is legal on the **class** (heap, precise RTTI) but would be **rejected inside `struct Tally`** (§6.3).
@@ -1928,9 +1932,10 @@ The following are genuine choices still left to the language designer. (Items th
 
 ### v0.5 (from v0.4)
 
-*A foundational pivot: traits become **Self-based** (Rust/Swift style), not parameter-based. Motivated by a holistic look at the type-abstraction roadmap. Full rationale, alternatives, and the parameter-based comparison are in [traits-design.md](traits-design.md).*
+*A foundational pivot: traits become **Self-based** (Swift style), not parameter-based, with an **implicit receiver**. Motivated by a holistic look at the type-abstraction roadmap. Full rationale, alternatives, and the parameter-based comparison are in [traits-design.md](traits-design.md).*
 
-- **Traits are now Self-based.** A trait has an implicit conforming type **`Self`** (the `self` receiver's type) plus zero or more *auxiliary* type parameters; the conformer is **not** a type parameter. `trait Show { fun show (self): String }`, `trait Ord { fun lt (self) (o: Self): Bool }`, `trait Collection[T] { fun size (self): Int }` (Self = collection, `T` = element). (§3.5, §5.3, §6.10, §6.11)
+- **Traits are now Self-based, with an implicit receiver.** A trait has an implicit conforming type **`Self`** plus zero or more *auxiliary* type parameters; the conformer is **not** a type parameter. Methods omit the receiver (Scala/Swift style) — inside a body the receiver is the keyword **`self`** (type `Self`): `trait Show { fun show: String }`, `trait Ord { fun lt (o: Self): Bool;  fun gte (o: Self): Bool = !(self .lt o) }`, `trait Collection[T] { fun size: Int }` (Self = collection, `T` = element). The explicit-`self`-parameter form (Rust/Go/Python) was considered and rejected as less OO-native (rationale in [traits-design.md](traits-design.md)). (§3.5, §5.3, §6.1, §6.10, §6.11)
+- **`self` and `static` are new keywords.** `self` = the implicit receiver; `static` marks an **associated** (no-receiver) member — `static fun empty: Self` — since the absence of a `self` parameter can no longer do so (Swift's `static func`). Associated members are called type-qualified (`T.empty`, §6.10). `Self` is the conformer type name. Extensions use the implicit receiver too — `extension Int { fun double: Int = self + self }` (Swift's `extension T { … }`). The receiver still lowers to the first NIR parameter (elaborator-inserted); only the source omits it. (§3.5, §5.3, §8.7)
 - **Why we switched (the decisive reason).** The roadmap wants *both* Java/Scala **parameter wildcards** (`Collection[?]`) and Rust/Swift **trait-object existentials** (`Dyn[Show]`). The first quantifies a *parameter*, the second the *conformer*. If the conformer **is** a parameter (parameter-based traits), those two quantifications land in the same syntactic slot and collide irreparably — **no spelling resolves it**. Making the conformer the implicit `Self` puts them in different slots (`?` over parameters, `Dyn[…]` over `Self`), so they never collide and compose (`Dyn[Collection[?]]`). Self-based also makes parameterized interfaces (`Collection[T]`) unambiguous, matches OO intuition, and maps nominal dispatch directly onto the backend's itables. Cost: symmetric multi-parameter type classes (Haskell MPTCs) are deferred. (full treatment in [traits-design.md](traits-design.md))
 - **Conformance: `<:` (nominal) and `given Trait for Type` (retroactive).** Nominal `<:` binds `Self` to the declaring type (`class Dog <: Show`, `class List[T] <: Collection[T]`). Retroactive `given … for …` names the conformer with `for`: `given Show for Int { … }`, `given [A: Show] Show for List[A] { … }`. A nominal `<:` still synthesizes a definition-site `given`. (§5.3, §6.10, §8.8)
 - **Typeclass requirements are `[A: Trait]` bounds.** `fun render[A: Show] (x: A)` discharges via the dictionary threaded by the bound; the `:` trait-bound is added to `type_param` (alongside the existing `<:` upper bound). `using` parameters remain for general (non-typeclass) contextual values, and a `given` **without** a `for` clause provides one (§5.3). (§5.3, §6.8, §8.8)

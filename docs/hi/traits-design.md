@@ -57,11 +57,11 @@ trait Show[A] { fun show (self: A): String }     // A is the conforming type
 The conformer is an **implicit, distinguished `Self`**; type parameters are **auxiliary**:
 
 ```
-trait Show { fun show (self): String }                       // Self = the conformer
-trait Collection[T] { fun size (self): Int;  fun get (self)(i: Int): T }  // Self = collection, T = element
+trait Show { fun show: String }                              // Self = the conformer (receiver implicit)
+trait Collection[T] { fun size: Int;  fun get (i: Int): T }  // Self = collection, T = element
 ```
 
-- **Strength:** "the conformer" is always `Self`, never a parameter. Interfaces are unambiguous; the value carries its own methods (matches OO intuition and the backend's itables).
+- **Strength:** "the conformer" is always `Self`, never a parameter. Interfaces are unambiguous; the value carries its own methods (matches OO intuition and the backend's itables). The receiver is **implicit** (Scala/Swift), so signatures read like ordinary OO interfaces.
 - **Weakness:** retroactive instances need the dictionary to be a value even though `Self` is abstract — solved by synthesizing a witness class for `given Show for Int` (representable on the erased/dictionary backend). Symmetric multi-parameter type classes (no privileged conformer) aren't expressible — pick one type as `Self` + auxiliary params (Rust's compromise).
 
 Both are viable. Hi originally chose parameter-based (matching Scala, its closest relative and backend lineage). The pivot to Self-based was forced by the roadmap, below.
@@ -99,7 +99,7 @@ That is the decisive reason. Self-based is the *only* model under which both roa
 
 - makes `Collection[T]` unambiguously an interface (the "is `T` the conformer or the element?" question never arises);
 - matches the OO intuition (a value carries its own methods) and maps nominal dispatch directly onto Scala Native's **itables**;
-- still expresses associated members (`fun empty: Self`) and multi-type relations (`trait Convert[B]`, `Self` = source).
+- still expresses associated members (`static fun empty: Self`) and multi-type relations (`trait Convert[B]`, `Self` = source).
 
 ---
 
@@ -117,6 +117,8 @@ The path to Self-based passed through several parameter-based patches. Each is r
 
 5. **Global coherence (one conformance per `(Trait, type)` across the link).** Considered to recover Rust/Haskell-style coherence. *Rejected* in favour of Scala's **scope-based** resolution — it forbade the legitimately useful case of two instances (e.g. ascending and descending `Ord for Int`). Determinism comes from deterministic per-scope lookup instead; the trade-off (instances can diverge across scopes) is accepted, as in Scala.
 
+6. **Explicit `self` parameter (Rust/Go/Python style), `fun show (self): String`.** Self-based traits can spell the receiver either way: explicit (Rust `&self`) or implicit (Swift/Scala `this`/`self`). Explicit `self` has one nicety — the *absence* of a `self` parameter marks an associated member with no extra keyword. *Rejected* in favour of the **implicit** receiver (`fun show: String`, receiver is the keyword `self` in the body) because Hi is **OO-native** and draws its surface from Scala/OCaml/Swift, all of which take the receiver implicitly; explicit `self` everywhere reads less like the OO interfaces Hi wants to make easy. The lost nicety is recovered with a `static` keyword (`static fun empty: Self`, Swift's `static func`) — a small, familiar cost. The receiver still lowers to the first NIR parameter; only the source omits it.
+
 ---
 
 ## 6. The final design (summary; normative in [spec §6.10](spec.md))
@@ -124,19 +126,19 @@ The path to Self-based passed through several parameter-based patches. Each is r
 **Declaration** — implicit `Self`, auxiliary params:
 
 ```hi
-trait Show { fun show (self): String }
-trait Ord  { fun lt (self) (o: Self): Bool;  fun gte (self) (o: Self): Bool = !(self .lt o) }
-trait Collection[T] { fun size (self): Int;  fun get (self) (i: Int): T }
-trait Convert[B] { fun convert (self): B }                   // Self = source, B = target
-trait Monoid { fun empty: Self;  fun combine (self) (o: Self): Self }   // associated member (no self)
+trait Show { fun show: String }                              // receiver implicit; `self : Self` in body
+trait Ord  { fun lt (o: Self): Bool;  fun gte (o: Self): Bool = !(self .lt o) }
+trait Collection[T] { fun size: Int;  fun get (i: Int): T }
+trait Convert[B] { fun convert: B }                          // Self = source, B = target
+trait Monoid { static fun empty: Self;  fun combine (o: Self): Self }   // `static` = associated (no receiver)
 ```
 
 **Conformance** — nominal or retroactive:
 
 ```hi
-class Dog <: Show { fun show (self): String = "woof" }       // nominal; Self = Dog; itable; dynamic
+class Dog <: Show { fun show: String = "woof" }              // nominal; Self = Dog; itable; dynamic
 class LinkedList[T] <: Collection[T] { … }                   // nominal parameterized interface
-given Show for Int { fun show (self): String = "…" }          // retroactive; Self = Int; dictionary
+given Show for Int { fun show: String = "…" }                 // retroactive; Self = Int; dictionary (self : Int)
 given [A: Show] Show for List[A] { … }                        // conditional
 ```
 
@@ -167,13 +169,13 @@ For anyone reading older drafts or porting Scala:
 
 | Parameter-based (old / Scala) | Self-based (Hi v0.5) |
 |---|---|
-| `trait Show[A] { fun show (self: A) }` | `trait Show { fun show (self) }` |
+| `trait Show[A] { fun show (self: A) }` | `trait Show { fun show }` (receiver implicit) |
 | `given Show[Int] { … }` | `given Show for Int { … }` |
 | `given f[A](using Show[A]): Show[List[A]]` | `given [A: Show] Show for List[A] { … }` |
 | `fun f[A] (x: A) (using Show[A])` | `fun f[A: Show] (x: A)` |
 | `class Dog <: Show` ≡ `<: Show[Dog]` (F-bound) | `class Dog <: Show` (Self = Dog, no sugar) |
 | `Array[Show]` ≡ `Show[?]`; `Show[*]` boxed | `Array[Show]` (no box); `Array[Dyn[Show]]` (boxed); `Collection[?]` is now a *parameter* wildcard |
-| `self` type defaults to the first type parameter | `self` type defaults to `Self` |
+| explicit `self` / `this` parameter | implicit receiver; `self` keyword in body; `static` for associated members |
 
 ---
 

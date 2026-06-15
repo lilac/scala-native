@@ -25,7 +25,7 @@ Hi's traits are **Self-based** (like Rust/Swift/Java): a trait has an implicit c
 |---|---|---|---|---|
 | **Nominal conformance** | "I'm defining this type; it conforms to these traits" | **Dynamic** (itable) | Yes | `class C <: Show` |
 | **Retroactive instance** | "Make a type I don't own (or a primitive/value type) conform; conditional instances" | **Static** (dictionary) | No | `given Show for Int { … }` |
-| **Extension methods** | "Add `.helper` syntax to a type — no trait, no conformance" | **Static** (direct call) | No | `extension (x: T) { … }` |
+| **Extension methods** | "Add `.helper` syntax to a type — no trait, no conformance" | **Static** (direct call) | No | `extension T { … }` |
 | **Existential trait object** *(deferred — [§2.2](spec.md))* | "A `List[Dyn[Show]]` of mixed payloads I don't own, dispatched per element" | **Dynamic** (carried dictionary) | No | `Dyn[Show]` |
 
 Three rules make this coherent:
@@ -42,8 +42,8 @@ Hi still gets Swift's useful feature — **protocol-extension default methods** 
 
 ```hi
 trait Ord {
-  fun lt  (self) (o: Self): Bool                 // abstract requirement (no body)
-  fun gte (self) (o: Self): Bool = !(self .lt o)  // default method (has a body)
+  fun lt  (o: Self): Bool                 // abstract requirement (no body)
+  fun gte (o: Self): Bool = !(self .lt o)  // default method (receiver is the implicit `self`)
 }
 ```
 
@@ -59,12 +59,12 @@ Hi's Self-based traits map almost 1:1 onto Rust (implicit `Self`, generic params
 
 | Rust | Hi | Notes |
 |---|---|---|
-| `trait Show { fn show(&self) -> String }` | `trait Show { fun show (self): String }` | implicit `Self`, like Rust |
+| `trait Show { fn show(&self) -> String }` | `trait Show { fun show: String }` | implicit receiver (Rust writes `&self`) |
 | `impl Show for Foreign` | `given Show for Foreign { … }` | retroactive → dictionary |
 | `impl Show for MyType` (you own it) | `class MyType <: Show { … }` | nominal → real itable |
 | `impl<A: Show> Show for Vec<A>` | `given [A: Show] Show for List[A] { … }` | conditional instance |
 | `fn f<T: Show>(x: T)` | `fun f[A: Show] (x: A)` | trait bound `[A: Show]` |
-| `trait Into<B> { fn into(self) -> B }` | `trait Convert[B] { fun convert (self): B }` | `Self` = source, `B` = target |
+| `trait Into<B> { fn into(self) -> B }` | `trait Convert[B] { fun convert: B }` | `Self` = source, `B` = target |
 | `dyn Show` / `Box<dyn Show>` | `Dyn[Show]` *(deferred)* — meanwhile hand-roll (§4) | existential = value + dictionary |
 | `&dyn (A + B)` | `Dyn[A & B]` | multi-trait object via intersection |
 | `enum E { A, B(i32) }` | `type E = \| A \| B(Int)` | ADT |
@@ -82,8 +82,8 @@ Also Self-based (`Self`/protocols), so it maps directly too.
 |---|---|---|
 | `protocol P { … }` | `trait P { … }` | implicit `Self` both sides |
 | `extension Foreign: P {}` (conformance) | `given P for Foreign { … }` | **split**: conformance ≠ helper methods |
-| `extension T { func helper() … }` | `extension (x: T) { fun helper () … }` | helper methods only, always static |
-| protocol-extension default | concrete trait member `fun m (self) = …` | no dispatch gotcha |
+| `extension T { func helper() … }` | `extension T { fun helper () … }` | helper methods only, always static; implicit `self` |
+| protocol-extension default | concrete trait member `fun m = …` | no dispatch gotcha |
 | `any P` | `Dyn[P]` *(deferred)* | boxed existential |
 | `some P` (opaque return) | `fun f[A: P]` | generic + trait bound |
 | `struct` (value) / `class` (ref) | `struct` / `class` | same split; Hi structs can't hold managed refs in MVP ([§6.3](spec.md)) |
@@ -96,11 +96,11 @@ Close relative for syntax, but Hi's traits are **Self-based** (Rust/Swift style)
 
 | Scala 3 | Hi | Notes |
 |---|---|---|
-| `trait Show[A] { def show(x: A): String }` (typeclass) | `trait Show { fun show (self): String }` | conformer is `Self`, not a param |
+| `trait Show[A] { def show(x: A): String }` (typeclass) | `trait Show { fun show: String }` | conformer is `Self`, not a param; receiver implicit |
 | `given Show[Int] with { … }` | `given Show for Int { … }` | `for` names the conformer |
 | `given f[A](using Show[A]): Show[List[A]] = …` | `given [A: Show] Show for List[A] { … }` | conditional instance |
 | `def f[A: Show](x: A)` / `(using Show[A])` | `fun f[A: Show] (x: A)` | trait bound; `def` → `fun` |
-| `extension (x: T) def m = …` | `extension (x: T) { fun m () = … }` | braced body, `fun` members |
+| `extension (x: T) def m = …` | `extension T { fun m () = … }` | braced body, `fun` members, implicit `self` |
 | `extension (x: A)(using Show[A]) def …` | *(deferred — [§2.2](spec.md))* | use a trait member instead |
 | `trait` / `sealed trait` + `case`s | `trait` / `type E = \| …` | ADTs are a `type` with leading `\|` |
 | `case class Point(x: Int, y: Int)` | `class Point (x: Int, y: Int)` or record `(x = 1, y = 2)` | |
@@ -126,15 +126,15 @@ package examples.dynshow
 
 import std.io.printf
 
-trait Show { fun show (self): String }            // Self-based: Self = the conformer
+trait Show { fun show: String }                   // Self-based: Self = the conformer; receiver implicit
 
-given Show for Int  { fun show (self): String = "an Int"  }
-given Show for Bool { fun show (self): String = "a Bool" }
+given Show for Int  { fun show: String = "an Int"  }      // self : Int
+given Show for Bool { fun show: String = "a Bool" }       // self : Bool
 
 // A hand-rolled existential: this class has *forgotten* its payload's type,
 // keeping only a thunk that closed over (value, dictionary) while both were known.
 class AnyShow (render: Unit -> String) {
-  fun show (self): String = self.render ()
+  fun show: String = self.render ()
 }
 
 // Factory: at the call site A and its `Show` conformance are both in scope,
@@ -163,10 +163,10 @@ package examples.dynshow
 
 import std.io.printf
 
-trait Show { fun show (self): String }
+trait Show { fun show: String }
 
-given Show for Int  { fun show (self): String = "an Int"  }
-given Show for Bool { fun show (self): String = "a Bool" }
+given Show for Int  { fun show: String = "an Int"  }
+given Show for Bool { fun show: String = "a Bool" }
 
 object Main {
   fun main (args: Array[String]): Unit = {
@@ -185,8 +185,8 @@ object Main {
 Don't reach for `Dyn[Show]` when you own the types — a bare trait-as-type is plain nominal subtyping and already works:
 
 ```hi
-class Dog (name: String) <: Show { fun show (self): String = "Dog" }
-class Cat (name: String) <: Show { fun show (self): String = "Cat" }
+class Dog (name: String) <: Show { fun show: String = "Dog" }
+class Cat (name: String) <: Show { fun show: String = "Cat" }
 
 val pets: Array[Show] = [ Dog("rex"), Cat("tom") ]   // no Dyn, no box — each carries its own itable
 ```
