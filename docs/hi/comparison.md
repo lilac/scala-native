@@ -31,7 +31,7 @@ Hi's traits are **Self-based** (like Rust/Swift/Java): a trait has an implicit c
 Three rules make this coherent:
 
 1. **`.m` resolution is a fixed three-tier lookup** ([spec §6.10](spec.md)): (1) a real member / itable method → (2) an in-scope `extension` → (3) a trait method via an in-scope conformance (`given … for …` or a `[A: Trait]` bound). Members beat extensions beat trait methods; ambiguity *within* a tier is an error. So `3 .show` works when `given Show for Int` is in scope.
-2. **Resolution is scope-based (Scala's model).** A `[A: Trait]` bound is met by the unique most-specific conformance **in scope**; a same-specificity tie is an ambiguity error *at the use site*. Hi does **not** force one conformance per `(Trait, type)` across the link — you can have two `Ord for Int`s (ascending and descending) and pick by scope, exactly as in Scala/Scala Native. (Trade-off — instances can diverge across scopes — [spec §6.10](spec.md), accepted for the flexibility.)
+2. **Resolution is scope-based (Scala's model).** A `[A: Trait]` bound is met by the unique most-specific conformance **in scope**; a same-specificity tie is an ambiguity error *at the use site*. Hi does **not** force one conformance per `(Trait, type)` across the link — you can have two `Ord for Int`s (ascending and descending) and pick by scope, exactly as in Scala/Scala Native. **Scope is controlled the Scala way:** a `given`/`extension` is in scope from its own module and the **companion scope** of the trait or conforming type (no import), or via an explicit import — **by name** (`import p.descOrd`) or the contextual wildcard **`import p.given`**; `import p.*` deliberately does *not* pull in givens, so a wildcard never silently changes resolution. Naming a `given`/`extension` is optional (like a lambda) — add it to import by name or disambiguate. (Trade-off — instances can diverge across scopes — [spec §6.10](spec.md), accepted for the flexibility.)
 3. **Nominal and typeclass paths interoperate.** `class Dog <: Show` binds `Self = Dog` and also **supplies a definition-site `given`**, so an owned type satisfies a `[A: Show]` bound with no extra instance written (a local `given` may coexist and win by scope). Bare `Show` as a *type* (`Array[Show]`) is the nominal existential — reference conformers, each carries its own itable, **no box**; `Dyn[Show]` is the separate, **boxed** form for *retroactive*/value conformers. Because the conformer is `Self` (never a parameter), the parameter wildcard `Collection[?]` and the conformer existential `Dyn[Show]` never collide. ([spec §6.10](spec.md))
 
 ### Why not just copy Swift?
@@ -82,7 +82,7 @@ Also Self-based (`Self`/protocols), so it maps directly too.
 |---|---|---|
 | `protocol P { … }` | `trait P { … }` | implicit `Self` both sides |
 | `extension Foreign: P {}` (conformance) | `given P for Foreign { … }` | **split**: conformance ≠ helper methods |
-| `extension T { func helper() … }` | `extension T { fun helper () … }` | helper methods only, always static; implicit `self` |
+| `extension T { func helper() … }` | `extension T { fun helper: R = … }` | helper methods only, always static; implicit `self` (nullary getter — bare `()` would be one `Unit` param, §2.1) |
 | protocol-extension default | concrete trait member `fun m = …` | no dispatch gotcha |
 | `any P` | `Dyn[P]` *(deferred)* | boxed existential |
 | `some P` (opaque return) | `fun f[A: P]` | generic + trait bound |
@@ -100,11 +100,14 @@ Close relative for syntax, but Hi's traits are **Self-based** (Rust/Swift style)
 | `given Show[Int] with { … }` | `given Show for Int { … }` | `for` names the conformer |
 | `given f[A](using Show[A]): Show[List[A]] = …` | `given [A: Show] Show for List[A] { … }` | conditional instance |
 | `def f[A: Show](x: A)` / `(using Show[A])` | `fun f[A: Show] (x: A)` | trait bound; `def` → `fun` |
-| `extension (x: T) def m = …` | `extension T { fun m () = … }` | braced body, `fun` members, implicit `self` |
+| `extension (x: T) def m = …` | `extension T { fun m: R = … }` | braced body, `fun` members, implicit `self` (nullary `def m` → nullary getter, not `()`) |
 | `extension (x: A)(using Show[A]) def …` | *(deferred — [§2.2](spec.md))* | use a trait member instead |
 | `trait` / `sealed trait` + `case`s | `trait` / `type E = \| …` | ADTs are a `type` with leading `\|` |
-| `case class Point(x: Int, y: Int)` | `class Point (x: Int, y: Int)` or record `(x = 1, y = 2)` | |
+| `case class Point(x: Int, y: Int)` | `struct Point (x: Int, y: Int)` or record `(x = 1, y = 2)` | case-class **value equality** → a `struct`/record (auto-derived `equals`/`hashCode`/`toString`, [§7.16](spec.md)); a plain `class` is reference identity |
 | `class C extends D with E` | `class C <: D, E` | `<:`, comma-separated |
+| `import p.given` / `import p.intOrd` | `import p.given` / `import p.intOrd` | givens are gated out of `import p.*`; named ones import by name |
+| `given intOrd: Ord[Int]` (named) | `given intOrd: Ord for Int` (named) | name = handle for by-name import / disambiguation |
+| (extensions imported as members) | `extension nums: Int { … }` (optional name) | Hi extensions can be *named* for by-name import; ride `import p.*` |
 | implicit conversions | — | not in MVP |
 
 ### Go, Java/Kotlin, OCaml (briefly)
@@ -124,7 +127,7 @@ The one capability that *seems* lost by dropping `impl` is "dynamically dispatch
 ```hi
 package examples.dynshow
 
-import std.io.printf
+import std.io.println
 
 trait Show { fun show: String }                   // Self-based: Self = the conformer; receiver implicit
 
@@ -145,23 +148,20 @@ fun anyShow[A: Show] (x: A): AnyShow =
 object Main {
   fun main (args: Array[String]): Unit = {
     val xs = [ anyShow 3, anyShow true, anyShow 7 ]   // heterogeneous: Array[AnyShow]
-    var i = 0
-    while i < xs.length do {
-      printf "%s\n" [xs.get i .show]                    // dynamic, per element
-      i = i + 1
-    }
+    for s in xs do
+      println "${s.show}"                             // dynamic, per element
   }
 }
 ```
 
-The closure `{ u => x.show }` captures the value `x` and (via the `[A: Show]` bound) its resolved dictionary. Each `AnyShow` is a uniform reference type, so `Array[AnyShow]` is fine, and `xs.get i .show` calls through the captured dictionary. This is exactly a `Box<dyn Show>` / `any Show` — built explicitly. *(Iterating by index with `.length`/`.get` because the fluent collections API, including `Array.foreach` and `for … in` over arrays, is deferred to the collections milestone — [§2.2](spec.md).)*
+The closure `{ u => x.show }` captures the value `x` and (via the `[A: Show]` bound) its resolved dictionary. Each `AnyShow` is a uniform reference type, so `Array[AnyShow]` is fine, and `s.show` calls through the captured dictionary. This is exactly a `Box<dyn Show>` / `any Show` — built explicitly. *(`for s in xs do …` iterates the array via the built-in `Array.foreach` intrinsic — [spec §6.2](spec.md), [§7.12](spec.md); the deferred part is the fluent `map`/`filter`/`fold` pipeline, not basic iteration.)*
 
 ### After `Dyn[Show]` — compiler-synthesized
 
 ```hi
 package examples.dynshow
 
-import std.io.printf
+import std.io.println
 
 trait Show { fun show: String }
 
@@ -171,11 +171,8 @@ given Show for Bool { fun show: String = "a Bool" }
 object Main {
   fun main (args: Array[String]): Unit = {
     val xs: Array[Dyn[Show]] = [ 3, true, 7 ]   // each element boxed with its given automatically
-    var i = 0
-    while i < xs.length do {
-      printf "%s\n" [xs.get i .show]            // dynamic dispatch through the carried dictionary
-      i = i + 1
-    }
+    for s in xs do
+      println "${s.show}"                       // dynamic dispatch through the carried dictionary
   }
 }
 ```
@@ -205,6 +202,8 @@ These trip up newcomers regardless of source language ([spec §4](spec.md)):
 - **`match` is postfix.** `e match { | pat => … }`, and it chains after method pipelines: `xs .map f match { … }`.
 - **Significant newlines, no indentation rule.** A newline ends a statement (with continuation rules); indentation never opens a scope. A line starting with `(`/`[`/`+`/`-` is a *new* statement — wrap long calls in parens.
 - **Lambdas use braces, never `fun`.** `{ x => e }`, `{ (x, y) => e }`; `fun` is only for named declarations.
+- **Strings interpolate; no format specifiers.** `"hi ${name}, ${a + b} items"` and the shorthand `$path` (`"$p.name"`) splice values rendered by `toString` (Kotlin/Swift-style). Write `\$` for a literal dollar; `c"..."` is raw (no interpolation). For width/precision use `printf`.
+- **Value types print and compare structurally; classes don't.** `struct`/record/tuple/ADT auto-derive `equals`/`hashCode`/`toString` (like Scala `case class`); a plain `class` keeps identity unless it overrides them ([spec §7.16](spec.md)).
 - **No `new`.** Construction is application: `Point(x = 1, y = 2)`.
 - **Arrays, not generic indexing.** `[1, 2, 3]` is an array literal; `xs.get i` / `xs.set i v` / `xs.length` — `xs[i]` is reserved (parses as type application).
 - **Case decides meaning.** Lowercase head = value/binding/type-variable; Uppercase head = type/constructor. `f x` is a call; `Point x` is construction.

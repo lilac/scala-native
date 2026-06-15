@@ -1,4 +1,4 @@
-# Hi Language Specification — v0.5
+# Hi Language Specification — v0.6
 
 > A statically-typed, expression-oriented, native-compiled language implemented as a new frontend that emits Scala Native's NIR and reuses the entire Scala Native backend.
 
@@ -124,7 +124,7 @@ This table is the authoritative MVP feature boundary. "Judgment call" rows mark 
 | Closure → SAM conversion | a closure checked against a single-abstract-method trait/interface | Synthesized closure class implements that interface instead of `scala.FunctionN` (§7.6, §8.1); covers javalib functional interfaces (`Runnable`, `Comparator`, …). |
 | Modules | `package a.b`, `import a.b.C` | Map to NIR `Global.Top` naming. |
 | Entry point | `object Main { fun main (args: Array[String]): Unit = ... }` | Lowers to NIR module `Main$` exposing the static `main([Ljava.lang.String;)Unit` discovered via `nir.Rt.ScalaMainSig`. |
-| String literals | plain `"..."`; **C-string literal `c"..."`** (the one prefixed-literal exception) | `c"..."` has type `CString` (≈ `Ptr[Byte]`), for libc interop (§3.6). No interpolation, no triple-quoted/raw strings. |
+| String literals | plain `"..."` with **interpolation** `${e}` / `$path`; **C-string literal `c"..."`** (the one prefixed-literal exception) | Interpolation holes render via `toString`/`String.valueOf`; no format specifiers (use `printf`), no triple-quoted/raw strings (§3.6, §8.11). `c"..."` has type `CString` (≈ `Ptr[Byte]`), raw, for libc interop. |
 | Runtime / stdlib reference | `java.lang.{Object,String,Class,Throwable,Thread}`, `scala.scalanative.runtime.*`, `scala.FunctionN`, primitive box classes, typed array classes | Referenced by canonical name from published nativelib/javalib/scalalib NIR; linker prunes to reachable set. |
 | Concurrency | OS threads (pthreads); virtual threads via javalib reuse | Closure→SAM conversion lets a Hi closure satisfy `Runnable`, so `Thread`/`Thread.ofVirtual` are ergonomically callable (§7.6, §9.6 note). |
 | Hi standard library (minimal) | `std.io.{print, println, printf}` | Hi-authored sources shipped with the compiler, compiled to NIR; delegate to javalib `System.out`/`String.format` (§10.2). `printf` takes `(fmt: String) (args: Array[Object])`; format semantics = `java.util.Formatter`. |
@@ -146,7 +146,7 @@ This table is the authoritative MVP feature boundary. "Judgment call" rows mark 
 | **Implicit conversions** | `given`/`extension` provide contextual abstraction, but implicit *coercion* between unrelated types is not in the MVP. |
 | **Union/intersection over value structs** | Unions and intersections are restricted to reference types. |
 | **User-defined symbolic/backtick operators; indexing sugar `xs[i]`** | The operator lexicon is a fixed closed set. Array *literals* are in the MVP via the spaced-`[` rule (§5.6); *tight* `xs[i]` indexing remains reserved (it parses as type application and fails — by design). Use `xs.get i` (§6.2). |
-| **Idiomatic native collections API (`List`/`Array`/`Map` with `map`/`filter`/`fold`/`foreach`)** | **Decided-deferred.** Hi *will* offer a native collections surface, but it is to be **built on Scala Native's existing collection library** (reachable via the `scalalib` NIR Hi already links — see §10) rather than reinvented. Deferring it keeps the MVP a clean vertical slice; until it lands, only the ADT/recursion/loop forms of §9 are guaranteed expressible, and the fluent collection-pipeline from the original Hi tour is **not** part of the MVP examples. (`for x in e do …` already works with any type exposing a `foreach`, §7.12.) |
+| **Idiomatic native collections API (`List`/`Array`/`Map` with `map`/`filter`/`fold`)** | **Decided-deferred.** Hi *will* offer a native collections surface, but it is to be **built on Scala Native's existing collection library** (reachable via the `scalalib` NIR Hi already links — see §10) rather than reinvented. Deferring it keeps the MVP a clean vertical slice; until it lands, only the ADT/recursion/loop forms of §9 are guaranteed expressible, and the fluent collection-pipeline from the original Hi tour is **not** part of the MVP examples. **Exception — `Array[T].foreach` is in the MVP** as a counted-loop intrinsic (§6.2), so `for x in xs do …` iterates arrays today (§7.12); the deferred part is the `map`/`filter`/`fold` pipeline, not basic iteration. |
 
 ---
 
@@ -183,8 +183,8 @@ RawIdent       ::= ident-start { ident-cont }
 
 Each `RawIdent` that is not a keyword (§3.5) is classified into exactly one of:
 
-- **LOWER_ID** — first letter (skipping leading underscores) is lowercase, **or** the identifier contains no letter (`_`, `_1`). Denotes: value/`val`/`var` bindings, `fun` names, parameters, record/struct fields, `given` names, **type variables**.
-- **UPPER_ID** — first letter (skipping leading underscores) is uppercase. Denotes: types, `class`, `struct`, `trait`, `object`, ADT constructors, type aliases.
+- **LOWER_ID** — first letter (skipping leading underscores) is lowercase, **or** the identifier contains no letter (`_`, `_1`). Denotes: value/`val`/`var` bindings, `fun` names, parameters, record/struct fields, `given` names.
+- **UPPER_ID** — first letter (skipping leading underscores) is uppercase. Denotes: types, `class`, `struct`, `trait`, `object`, ADT constructors, type aliases, and **type variables / type parameters** (`[A, B]`, `[T: Show]`, `Self`). A type variable is therefore always uppercase — there is no lowercase type-variable form (`type_param ::= UPPER_ID …`, §5.3).
 
 This convention also tells the elaborator how to lower an application: in `f x`, `f` is a value (LOWER_ID), so this is a plain call; in `Point(...)`, `Point` is a type/constructor (UPPER_ID), so the same application syntax lowers to construction (§7.7). Both are *parsed* identically as application (v0.3); only the head's case decides the lowering.
 
@@ -279,18 +279,22 @@ Exp       ::= ("e"|"E") [ "+" | "-" ] DecInt
 FloatSuffix ::= "f" | "F" | "d" | "D"
 
 CharLit    ::= "'" ( CharElem | Escape ) "'"
-StringLit  ::= "\"" { StringElem | Escape } "\""
-CStringLit ::= "c" StringLit
+StringLit  ::= "\"" { StringElem | Escape } "\""            // no interpolation trigger -> one plain token
+InterpStr  ::= "\"" { StringElem | Escape | Interp }+ "\""  // contains >=1 '$' trigger (lexed structurally)
+Interp     ::= "$" LOWER_ID ( "." LOWER_ID )*               // shorthand: a value path
+            |  "${" Expr "}"                                // full expression hole
+CStringLit ::= "c" StringLit                               // raw; '$' is a literal byte (no interpolation)
 BoolLit    ::= "true" | "false"
 ```
 
 - **Integers.** Underscores are digit-group separators, stripped by the lexer. Default literal type is `Int` (NIR `Int`, 32-bit signed); a trailing `L`/`l` makes it `Long`. Hex/binary forms are unsigned bit patterns of the inferred width.
 - **Floats.** A literal with a `.`, an exponent, or an `f`/`d` suffix is floating point. Default literal type is `Double`. `f`/`F` → `Float`; `d`/`D` → `Double`.
 - **Char.** Single-quoted; type `Char` (NIR `Char`, 16-bit unsigned).
-- **String.** Double-quoted; type `String`, lowered to `java.lang.String` (the canonical 4-field layout `value, offset, count, cachedHashCode`). **No string interpolation; no triple-quoted/raw strings.**
-- **C-string.** `c"..."` is the **one prefixed-literal form in the MVP**. It has type `CString` (a libc-interop alias for `Ptr[Byte]`), lowering to a NUL-terminated byte sequence reachable as a raw pointer. It exists for direct libc/FFI interop (`scala.scalanative.libc`); the §9 examples use Hi's `std.io` (§10.2) instead. It is *not* a general interpolation mechanism.
+- **String.** Double-quoted; type `String`, lowered to `java.lang.String` (the canonical 4-field layout `value, offset, count, cachedHashCode`). **No triple-quoted/raw strings.**
+- **String interpolation (in the MVP).** A plain `"..."` is **interpolated**: `${ expr }` splices the value of any expression, and the shorthand `$path` (a `LOWER_ID` with optional `.field` selectors — `$x`, `$p.name`) splices a value path. A literal dollar is `\$` (escape) or `$$`; `$` not followed by `{` or a `LOWER_ID` is a literal `$`. Inside `${ … }` the braces self-delimit (newlines insignificant, like `( )`), and the hole may itself contain strings. The result type is `String`; each hole is rendered by its `toString` (§7.16) — primitives and `Object`s via `java.lang.String.valueOf`, a `null` hole rendering `"null"`. Holes evaluate left-to-right, interleaved with the literal chunks, and the pieces concatenate. There are **no format specifiers** — for width/precision/locale formatting use `printf` (§10.2). A string with no `$` trigger is lexed as a single plain token identical to before (zero overhead); one with a trigger is lexed structurally into the `interp_string` production (§5.6) and lowered per §8.11. (Interpolation is *not* a prefix form, so `c"..."` remains the one prefixed literal.)
+- **C-string.** `c"..."` is the **one prefixed-literal form in the MVP**. It has type `CString` (a libc-interop alias for `Ptr[Byte]`), lowering to a NUL-terminated byte sequence reachable as a raw pointer. It exists for direct libc/FFI interop (`scala.scalanative.libc`); the §9 examples use Hi's `std.io` (§10.2) and interpolation instead. It is **raw**: a `$` inside `c"..."` is a literal byte, *not* an interpolation trigger.
 - **Bool.** `true`/`false`, type `Bool`.
-- **Escapes** (char and string): `\n \r \t \b \f \\ \" \' \0`, plus `\uXXXX`. Unknown escapes are a lexical error.
+- **Escapes** (char and string): `\n \r \t \b \f \\ \" \' \0`, plus `\uXXXX`; in a string, `\$` is a literal dollar (suppresses interpolation; `$$` works too). Unknown escapes are a lexical error.
 
 > **Judgment call.** No hex-float literals. Default literal types are `Int` and `Double`, matching NIR convention so arithmetic lowers without surprise widening.
 
@@ -381,8 +385,9 @@ xs.filter { x => positive x }
 Whitespace application (level 3) applies a callable to a sequence of **bounded arguments**. An argument is *bounded* iff its extent is self-delimiting. The bounded-argument forms are exactly:
 
 ```
-BoundedArg ::= Literal                     // 1, 3.0, 'c', "s", c"s", true
+BoundedArg ::= Literal                     // 1, 3.0, 'c', "s", c"s", "x=${e}", true
              | LOWER_ID | UPPER_ID         // identifiers (incl. nullary names)
+             | "self"                       // the implicit-receiver keyword (§5.3) is an atom
              | "(" Expr ")"                // parenthesized expression (any expr)
              | Tuple | NamedTuple          // (1, 2)   (x=1, y=2)   (x=1)
              | ArrayLit                    // [1, 2, 3]   (spaced '[', §5.6)
@@ -447,7 +452,7 @@ This section is the **single source of truth for Hi's surface syntax**. Where an
 - `|` — alternation at the **metalevel** (the Hi type-union/ADT/match bar appears quoted as `"|"`).
 - `X*`, `X+`, `X?` — repetition / optionality. `( ... )` — metagrouping. `"..."` — literal terminal.
 - `sepBy(X, s)` = `( X ( s X )* )?`; `sepBy1(X, s)` = `X ( s X )*`. Trailing separators per §3.4.
-- Lexical terminals (from §3): `LOWER_ID`, `UPPER_ID`, `INT_LIT`, `FLOAT_LIT`, `STRING_LIT`, `CSTRING_LIT`, `CHAR_LIT`, `BOOL_LIT`, `UNIT_LIT` (`()`).
+- Lexical terminals (from §3): `LOWER_ID`, `UPPER_ID`, `INT_LIT`, `FLOAT_LIT`, `STRING_LIT`, `CSTRING_LIT`, `CHAR_LIT`, `BOOL_LIT`, `UNIT_LIT` (`()`). An **interpolated** string (§3.6) is delivered to the parser not as one token but as the structured run `STR_OPEN ( STR_CHUNK | "${" … "}" | "$" LOWER_ID )* STR_CLOSE` consumed by `interp_string` (§5.6); inside a `${ … }` hole the lexer resumes ordinary tokenizing with brace-depth tracking (newlines insignificant).
 - **`term`** — the statement terminator: a significant newline per the §3.4 filter, or an explicit `;`. Newlines inside `( )`/`[ ]` are never `term`. `CHAIN_DOT` is the whitespace-preceded `.` of §4.2 (the tight `.` appears in `postfix_expr`).
 
 ### 5.2 Program and items
@@ -457,7 +462,7 @@ program     ::= package_clause? import_clause* items_block EOF
 
 package_clause ::= "package" qual_name
 import_clause  ::= "import" import_path
-import_path    ::= qual_name ( "." "{" sepBy1(import_sel, ",") "}" | "." "*" )?
+import_path    ::= qual_name ( "." "{" sepBy1(import_sel, ",") "}" | "." "*" | "." "given" )?
 import_sel     ::= ident ( "=>" ident )?            // rename
 qual_name      ::= ident ( "." ident )*
 ident          ::= LOWER_ID | UPPER_ID
@@ -468,6 +473,8 @@ item        ::= val_decl | var_decl | fun_decl | type_decl
              |  struct_decl | class_decl | trait_decl
              |  extension_decl | given_decl | object_decl
 ```
+
+**Import forms.** `import p.C` / `import p.{C, f => g}` import named members (with optional rename); `import p.*` imports `p`'s regular members **and** its `extension`s, but **not** its `given`s; `import p.given` is the **contextual wildcard** — it brings all of `p`'s `given` conformances (named *and* anonymous) into scope at once. A *named* `given`/`extension` is also importable **by name** (`import p.descOrd`). The asymmetry — givens excluded from `*`, gated behind `import p.given` or by-name — keeps a wildcard from silently changing which conformance resolves (§6.10 "Bringing conformances and extensions into scope").
 
 Each `item` begins with a distinct introducing keyword (`val`/`var`/`fun`/`type`/`struct`/`class`/`trait`/`extension`/`given`/`object`), so items are self-delimiting with no separator token; the parser ends an item when it sees the next item keyword or the enclosing `}`. `items_block` is reused as the body of `object`, `trait`, and the braced `given`. (Top-level items do **not** include bare expression statements or `return`: executable statements live only inside `fun` bodies and blocks, §5.4. Top-level `fun`/`val` items directly inside a `package` lower to a synthesized `<package>.package$` module, §8.5.)
 
@@ -486,7 +493,7 @@ type_ann    ::= ":" type
 #### Functions (curried; nullary permitted)
 
 ```
-fun_decl    ::= "fun" LOWER_ID type_params? param_list* ( ":" type )? ( "=" expr )?
+fun_decl    ::= "static"? "fun" LOWER_ID type_params? param_list* ( ":" type )? ( "=" expr )?
 
 type_params ::= "[" sepBy1(type_param, ",") "]"
 type_param  ::= UPPER_ID ( "<:" type )? ( ":" type )?   // optional upper (subtype) bound AND/OR trait bound
@@ -498,6 +505,7 @@ param       ::= "using"? LOWER_ID type_ann? ( "=" expr )?
 - `param_list*` realizes both multiple parameter lists (`fun f (a) (b) = …`) **and the nullary form** (`fun neg: Int = …`, zero lists). A nullary `fun` is a 0-ary method/getter: it is always *saturated* and is invoked by selection (`x.neg`, `x .neg`) — it never eta-expands.
 - An **empty parameter list** `()` declares exactly **one parameter of type `Unit`** (the OCaml convention): `fun ping (): Unit = …` is unary and is saturated by applying the Unit literal — `ping ()`. This is distinct from the zero-list nullary getter above; without this rule, `f ()` (application to the bounded argument `()`) could never saturate a "zero-parameter" list.
 - A `using`-marked parameter (or a whole trailing list of them) is a contextual parameter, filled by `given` search (§6.11).
+- **The optional `static` modifier** marks an **associated (no-receiver) member** — `static fun empty: Self` — for which `self` is *not* in scope (§5.3 receiver convention). It is legal only inside a `trait`, `class`, `object`, or `given` body; a `static fun` at top level, in a block, in a `struct` body, or in an `extension` body is a compile error (extensions are pure receiver sugar, §6.10). A `static` member is called **type-qualified** (`T.empty`, `Int.empty`, `A.empty`), never on an instance, and never eta-expands across the receiver. Its lowering is in §8.8.
 - `type_param` admits an optional **upper (subtype) bound** `<: type` *and/or* a **trait bound** `: Trait` (the conformance / typeclass constraint, §6.10). `[A <: Animal]` means *A is a subtype of `Animal`*; `[A: Show]` means *A conforms to the trait `Show`* (nominally or via a `given`), and desugars to an implicit dictionary parameter threaded like a `using` (§6.8, §8.8). Multiple trait bounds use intersection — `[A: Show & Ord]`. **There is still no variance and no lower bounds.** (The `:` trait-bound is new in v0.5; earlier versions routed typeclass constraints only through explicit `using Show[A]` parameters, which the Self-based model replaces — §6.10.)
 
 #### Receiver convention for methods (`self`)
@@ -556,7 +564,8 @@ class_body  ::= "{" items_block "}"
 trait_decl    ::= "trait" UPPER_ID type_params? trait_parents? "{" items_block "}"
 trait_parents ::= "<:" sepBy1(type, ",")
 
-extension_decl ::= "extension" type_params? type "{" ext_member* "}"   // 'extension Int { … }'; receiver is implicit `self`
+extension_decl ::= "extension" ext_name? type_params? type "{" ext_member* "}"   // 'extension Int { … }'; receiver is implicit `self`
+ext_name       ::= LOWER_ID ":"                        // optional name (like given_name), for by-name import
 ext_member     ::= fun_decl                            // self-delimiting (keyword-introduced); no separator
 
 given_decl    ::= "given" given_name? type_params? type ( "for" type )? given_body
@@ -583,7 +592,11 @@ given Config = defaultConfig                              // plain contextual va
 
 The optional `type_params` carry conditional constraints (`[A: Show]`); the optional `given_name` lets two conformances for the same pair be distinguished and scope-selected (§6.10). `for` reuses the existing keyword (no ambiguity: it follows a trait type inside a `given`, never a loop here). The parser commits to the conformance form on seeing a depth-0 `for` before `given_body`, otherwise to the plain-value form (bounded lookahead).
 
+> **Multi-type relations (`Convert[A, B]`).** A trait can relate several types even though `for` names only one. Under the Self-based model **one type is `Self`** (the `for`-type) and the rest are **auxiliary trait arguments** carried *inside* the trait application: `trait Convert[B]` (Self = source, `B` = target) is supplied as `given Convert[String] for Int { … }` — "`Int` converts to `String`", `Self = Int`, `B = String`. A conditional, both-free instance writes the free types in `type_params`: `given [A: Foo, B: Bar] Convert[B] for A { … }`. So an N-type relation is `Trait[aux…] for Self`: the brackets hold the auxiliary/free types, `for` picks the privileged conformer. (A truly *symmetric* relation with no privileged type — a Haskell MPTC — is deferred; pick one type as `Self`, the Rust compromise, §6.10.) An `extension`, by contrast, extends exactly one receiver type — it adds methods to a single `Self`, never a relation — which is why it has no `for` clause.
+
 An `extension Type { … }` body holds only `fun` members (no `val`): an extension adds no storage to the receiver's type, so a "computed property" is just a nullary getter `fun sign: Int = …` (invoked by selection, §4.2). The receiver is the implicit `self` of the extended `Type` (Swift's `extension T { … self … }`), exactly as in a `trait`/`class` body — e.g. `extension Int { fun double: Int = self + self }`.
+
+An extension may carry an **optional name** (`extension nums: Int { … }`), mirroring `given_name`. The name is purely a handle for **by-name import** (`import p.nums`) and disambiguation; it never participates in `.m` resolution (§6.10), which is by the receiver's static type as always. The leading `LOWER_ID ":"` is unambiguous because the extended `type` is `UPPER_ID`/`(`-led (a type is never a bare lowercase, §3.3), so one token of lookahead separates a name from the type. Naming is optional exactly like a lambda's: omit it for a local, single extension; add it when the extension must travel by name across modules (§6.10).
 
 The entry point is an `object_decl` named `Main` whose body declares `fun main (args: Array[String]): Unit = …` (a linker convention, not special grammar). **Object/module-level `var` fields are rejected in MVP** (§2, §6).
 
@@ -677,6 +690,7 @@ How `app_tail*` realizes §4.2:
 
 ```
 call_arg    ::= literal
+             |  "self"                          // the receiver keyword, as a bounded atom (§5.3)
              |  arg_path                       // LOWER_ID/UPPER_ID with '.' tail; takes no whitespace args
              |  paren_or_tuple
              |  named_tuple_lit
@@ -692,6 +706,8 @@ call_arg    ::= literal
 ```
 primary     ::= literal
              |  UNIT_LIT                        // ()
+             |  "self"                          // implicit-receiver keyword; only inside a method/given body (§5.3)
+             |  interp_string                   // "a=${e}" — interpolated string (§3.6); bounded, self-delimiting
              |  paren_or_tuple
              |  named_tuple_lit
              |  array_lit
@@ -700,6 +716,12 @@ primary     ::= literal
              |  path                            // incl. UPPER_ID = constructor function value
 
 literal     ::= INT_LIT | FLOAT_LIT | STRING_LIT | CSTRING_LIT | CHAR_LIT | BOOL_LIT
+
+// Interpolated string: lexer-delimited chunks interleaved with expression holes (§3.6).
+// The braces of '${ … }' self-delimit (newlines inside are insignificant, like '( )'), so
+// an interp_string is a single bounded primary regardless of the holes' contents.
+interp_string ::= STR_OPEN ( STR_CHUNK | "${" expr "}" | "$" LOWER_ID ( "." LOWER_ID )* )* STR_CLOSE
+//   '$x' / '$p.name' is shorthand for '${x}' / '${p.name}'; richer holes use the explicit '${ … }'
 
 path        ::= ( LOWER_ID | UPPER_ID ) ( "." LOWER_ID | "." UPPER_ID )* type_args?
 
@@ -780,8 +802,8 @@ type_arg_block  ::= "[" sepBy1(type_arg, ",") "]"
 type_arg        ::= type | "?"                               // '?' = wildcard over this parameter (deferred, §2.2)
 
 atom_type       ::= type_path | tuple_type | named_tuple_type | "(" type ")"
-type_path       ::= UPPER_ID ( "." UPPER_ID )*                // qualified type name; incl. built-in 'Dyn', 'Self'
-                 |  LOWER_ID                                  // type variable in scope
+type_path       ::= UPPER_ID ( "." UPPER_ID )*                // qualified type name or in-scope type variable
+                 //   (type variables are UPPER_ID, §3.3; incl. built-in 'Dyn', 'Self'). No lowercase type form.
 tuple_type      ::= "(" type ( "," type )+ ")"                // arity >= 2
 named_tuple_type::= "(" named_field_t ( "," named_field_t )* ","? ")"  // arity >= 1; (x: Int) is one-field
 named_field_t   ::= LOWER_ID ":" type
@@ -792,6 +814,13 @@ named_field_t   ::= LOWER_ID ":" type
 - **bare `Trait`** (e.g. `Show`, `Collection[Int]`) — the **nominal existential**: some reference type that conforms via `<:`, dispatched through its own itable, no box. Works today.
 - **`Dyn[Trait]`** — the **boxed existential** (deferred, §2.2). `Dyn` is a compiler-known type constructor parsed as ordinary type application (`Dyn[Show]`, `Dyn[Show & Drawable]`), so it needs **no** special grammar; it quantifies over `Self`.
 - **`Generic[?]`** — a **parameter wildcard** (deferred, §2.2). `?` is reserved now as a type argument (it is a new token occurring only in `type_arg` position; Hi has no other `?` syntax) so the future feature is collision-free, but capture/bounds checking is deferred. `?` quantifies an *auxiliary parameter* — a different slot from `Dyn`'s `Self` — so the two compose (`Dyn[Collection[?]]`).
+
+> **Existential-eligibility (object safety; normative).** Only an **existential-eligible** trait may be written as a bare `Trait` (nominal existential) or `Dyn[Trait]` (boxed existential) — i.e. used as a type where the conformer `Self` is *unknown*. A trait is existential-eligible iff every member satisfies all of:
+> - `Self` occurs **only as the implicit receiver** — never in an **argument** type, a **return** type, or an auxiliary type-argument position. So `trait Ord { fun lt (o: Self): Bool }` (`Self` in an argument) and `trait Clone { fun clone: Self }` (`Self` returned) are **not** eligible: an erased existential cannot supply a second value of the *same* hidden `Self`, nor hand one back. (`Self` appearing only as the receiver is fine even when other type *parameters* appear, so `trait Convert[B] { fun convert: B }` and `trait Collection[T] { fun get (i: Int): T }` **are** eligible — `B`/`T` are auxiliary, not `Self`.)
+> - the trait has **no `static` (associated) member** (`static fun empty: Self` has no receiver to dispatch on, so it is meaningless when `Self` is unknown);
+> - no member introduces its **own method-level type parameters** (`fun m[B] …`).
+>
+> This is exactly Rust's *object safety* and Swift's "has `Self`/associated-type requirements" restriction. A non-eligible trait is still **fully usable** as a `[A: Trait]` bound (there `Self = A` is a *known* type variable, dictionary-threaded) and via nominal `<:` conformance with concrete dispatch — it simply cannot be erased to an existential where `Self` is forgotten. Using a non-eligible trait as a bare `Trait`/`Dyn[Trait]` type is a **compile error** that names the offending member. (`Show`, `Drawable`, `Collection[T]`, `Convert[B]` — `Self` in receiver position only — are eligible and work as `Array[Show]`, `Dyn[Show]`, etc.)
 
 **Type-level disambiguation (normative).** The four `(`-leading type forms are resolved by parsing the parenthesized group and then looking at what follows the matching `)` (this is **not** LL(1); the parser uses a backtracking gate / Pratt lookahead to the matching close `+1`):
 
@@ -815,6 +844,7 @@ Right-associativity of `->` and the layering union-looser-than-intersection-loos
 9. **Newline termination:** `f x ⏎ (y)` is two statements (a `(`-led line never continues an application); `xs.filter p ⏎ .map f` is one chain (leading-`.` continuation, §3.4).
 10. **Spacing around `.`:** `x.m` is tight selection on `x`; `x .m` is chain selection on the accumulated value to its left.
 11. **Postfix match vs trailing closure:** `f x match { | A => 1 | B => 2 }` — the scrutinee is the application `f x`, then postfix `match`; `f x { y => e }` (no `match`) still passes a trailing closure.
+12. **Interpolation is one bounded primary:** `println "n=${ a + b } ok"` lexes to an `interp_string` (`STR_OPEN` `"n="` `${` `a + b` `}` `" ok"` `STR_CLOSE`) and is a single bounded argument to `println`; the `${ }` braces self-delimit (the `+` inside needs no parens). A `"…"` with no `$` is a plain `STRING_LIT`. The `{` of `${` is recognized only inside a string, so it never competes with block/closure/arm-block `{`.
 
 ### 5.11 Out of MVP scope (not in this grammar)
 
@@ -887,6 +917,7 @@ The modes meet at subsumption: in check mode, synthesize `S`, then require `S <:
 - **Bitwise & shift methods** — All integer primitive types have built-in methods `.and`, `.or`, `.xor`, `.shl`, `.shr`, `.ushr`, `.not` that lower directly to NIR `Op.Bin` nodes (§7.15). These are compiler intrinsics, always available without an import. Following the general chain-selection idiom (§4.2), they are used in operator style: `34 .or 1`, `flags .and mask`, `x .shl 2`.
 - **Boxing**: a primitive used where a reference type is expected (stored in `Array[Object]`, a union, or a generic at a reference type) is boxed to its canonical box class (`java.lang.Integer`, …) per the NIR box/unbox tables; inserted by the elaborator.
 - `String` is the reference type `java.lang.String` (4 fields `value, offset, count, cachedHashCode`). `Array[T]` is `Type.Array(elemTy)`; arrays are built with literals `[e1, …, en]` (§5.6) or runtime allocation, and accessed with the built-in members `xs.get i`, `xs.set i v`, `xs.length` (lowering to `Op.Arrayload`/`Op.Arraystore`/`Op.Arraylength`, §8.9). Indexing sugar `xs[i]` is reserved (§2.2).
+- **`Array[T]` also has a built-in `foreach`** — `xs.foreach (f: T -> Unit): Unit` — a compiler intrinsic that lowers to a counted index loop (`Op.Arraylength` bound, `Op.Arrayload` per step, then applying `f`), **not** part of the deferred fluent collections API (§2.2). It exists so the MVP `for x in xs do …` form (§7.12) iterates arrays out of the box; the richer `map`/`filter`/`fold` surface still awaits the collections milestone. (`String` exposes no `foreach` in the MVP — iterate `s.length` with explicit char access if needed.)
 - **`Null` and nullability (surface decision).** MVP reference types are **nullable** (mirroring the backend `Type.Ref.nullable`). `null` arises only from interop/runtime, has type `Null <: R` for every reference type `R`, and dereferencing it throws `NullPointerException` (§7).
 
 ### 6.3 Struct (value) vs. Class (reference)
@@ -1073,6 +1104,31 @@ An extension adds `.method` / ` .method` (chain) syntax to a type **without** de
 
 Hi does **not** require a single conformance per `(Trait, type)` across the link. Multiple `given`s for the same pair may coexist — e.g. a default `given Ord for Int` plus a `given descOrd: Ord for Int` in another scope — and a `[A: Trait]` bound (or explicit `using`) is discharged by **in-scope** contextual search: the unique most-specific in-scope candidate wins, and **two equally-specific candidates in scope are an ambiguity error at the use site** (not at the definition). No-conformance-found and divergent recursive search are also errors. This is exactly Scala/Scala Native's contextual resolution; determinism comes from deterministic per-scope lookup, not from forbidding alternatives. Orphan `given`s are permitted (as in Scala). *Trade-off, stated honestly:* dropping global coherence means the same `(Trait, type)` can resolve to different instances in different scopes — including a hand-written `given` diverging from a type's nominal `<:` behavior — so a dictionary threaded into a data structure is not guaranteed identical to one resolved elsewhere; this is the accepted Scala-style cost of the flexibility, and the closed-world link keeps the *set* of candidates statically known.
 
+#### Bringing conformances and extensions into scope (imports)
+
+"In scope" (above) is made precise here. A `given` or `extension` is a resolution candidate only where it is **in scope**, and exactly three things put it there — the first two need **no import**, mirroring Scala 3's *implicit scope*:
+
+1. **The current module / enclosing lexical scope.** A `given`/`extension` is visible to everything after it in the same file or block.
+2. **The definition-site (companion) scope of the trait *or* the conforming type.** `given Show for Dog` written in the module that defines `Dog` (or the one that defines `Show`) is in scope wherever `Dog`/`Show` is used, with no import — the **canonical-instance** path. The definition-site `given` synthesized by a nominal `class Dog <: Show` (above) lives here too, which is why an owned type satisfies a `[A: Show]` bound for free.
+3. **An explicit import**, for an **orphan** (a `given`/`extension` defined in some third module, next to neither type):
+   - **by name** — `import geo.descOrd` (a *named* `given`/`extension` is an ordinary named member): precise, and the way to **choose between competing instances**;
+   - **by contextual wildcard** — `import geo.given` brings *all* of `geo`'s `given`s into scope (the anonymous ones included), the analogue of Scala 3's `import p.given`.
+
+**`import p.*` does not import `given`s** — only regular members and `extension`s. A `given` is threaded *invisibly*, so a plain wildcard must never silently change which conformance resolves; you opt in with `import p.given` or by name. `extension`s *do* ride `import p.*` like normal members, because an extension call is **visible** at the use site (`x.double`) — a clash is a use-site tier-2 error (below), not a silent change.
+
+**Named vs. anonymous — optional, like a lambda.** Naming a `given`/`extension` is optional and never affects resolution; the name is only a **handle for import and disambiguation**:
+
+```hi
+given Show for Int { … }              // anonymous: found in its own module + companion scope + `import p.given`
+given descOrd: Ord for Int { … }      // named: also `import p.descOrd`, and tells two Ord-for-Int apart (above)
+extension Int { fun double: Int = … }         // anonymous extension
+extension nums: Int { fun triple: Int = … }   // named: `import p.nums`
+```
+
+Use a **name** when the instance must be imported by name or two instances for the same `(Trait, type)` must be told apart; **omit** it for a local, single, obvious instance (still found in-module, via companion scope, and via the wildcard). Anonymous and named candidates resolve identically — naming changes *how you bring it into scope*, never *what wins*.
+
+> **Why `given`s are gated but `extension`s are not.** Both can clash, but the failure modes differ. Two in-scope `given Ord for Int` are an *invisible* contradiction (the dictionary is threaded implicitly), so Hi makes their import explicit (`import p.given` / by name) and keeps them out of `*` — you always see, in the import list, every contextual instance you pulled in. An `extension` clash surfaces at a *visible* call (`3 .triple` resolving to two `triple`s) and is a plain compile error there, so extensions can travel on `*` like ordinary methods. This is the Scala-3 split, and the reason `import p.given` exists as its own form.
+
 #### Unified `.m` resolution (normative)
 
 A selection `recv.m` or chain step `recv .m` (§4.2) resolves `m` against the receiver's static type in **this fixed order**; a lower tier fires only when every higher tier misses, and ambiguity *within* a tier is a compile error:
@@ -1085,8 +1141,8 @@ A selection `recv.m` or chain step `recv .m` (§4.2) resolves `m` against the re
 
 > **Note (a trait in type position — four orthogonal uses).** Because traits are Self-based, "the conformer" is `Self` (never a parameter), so quantifying over the conformer and quantifying over a parameter live in **different syntactic slots** and never collide:
 > - **`[A: Show]` — a bound** (above): "this `A` conforms to Show"; dictionary threaded, no value-level box. The typeclass use.
-> - **bare `Show` (or `Collection[Int]`) as a type — nominal existential, no box.** "Some reference type that nominally conforms." Holds values that conform via `<:`; each carries its own itable; dispatch is dynamic. `val xs: Array[Show] = [Dog(...), Cat(...)]` type-checks by subsumption. `3` cannot go here — `Int` is not a nominal subtype of `Show`. This is the Java-interface-as-type reading and works today.
-> - **`Dyn[Show]` — boxed existential (deferred, §2.2).** "Some type that conforms, *possibly retroactively*, boxed with its dictionary." Admits `given`-based and value/primitive conformers: `val xs: Array[Dyn[Show]] = [3, true, dog]`. Coercion into `Dyn[Show]` is implicit and type-directed (no `as` cast), exactly how Rust coerces to `dyn` and Swift to `any`; the cost (allocation + indirect dispatch) stays visible in the type. Multi-trait objects reuse intersection: `Dyn[Show & Drawable]`. `Dyn` is a compiler-known type constructor (like `Array`), so it needs no new grammar.
+> - **bare `Show` (or `Collection[Int]`) as a type — nominal existential, no box.** "Some reference type that nominally conforms." Holds values that conform via `<:`; each carries its own itable; dispatch is dynamic. `val xs: Array[Show] = [Dog(...), Cat(...)]` type-checks by subsumption. `3` cannot go here — `Int` is not a nominal subtype of `Show`. This is the Java-interface-as-type reading and works today. **Only an existential-eligible trait may be used this way** (`Self` in receiver position only, no `static` members, no per-method type params — the object-safety rule of §5.9); e.g. `Array[Ord]` is rejected because `Ord.lt`'s `o: Self` cannot be supplied at an erased `Self`.
+> - **`Dyn[Show]` — boxed existential (deferred, §2.2).** "Some type that conforms, *possibly retroactively*, boxed with its dictionary." Admits `given`-based and value/primitive conformers: `val xs: Array[Dyn[Show]] = [3, true, dog]`. Like the bare form, the trait must be **existential-eligible** (§5.9). Coercion into `Dyn[Show]` is implicit and type-directed (no `as` cast), exactly how Rust coerces to `dyn` and Swift to `any`; the cost (allocation + indirect dispatch) stays visible in the type. Multi-trait objects reuse intersection: `Dyn[Show & Drawable]`. `Dyn` is a compiler-known type constructor (like `Array`), so it needs no new grammar.
 > - **`Collection[?]` — parameter wildcard (deferred, §5.9).** "A collection of *some* element"; `?` quantifies an *auxiliary parameter*, the Java/Scala wildcard — orthogonal to `Dyn`, and composable: `Dyn[Collection[?]]`.
 >
 > Tiers 2–3 are **static**: `3 .show` via a `given` dispatches on the *static* type `Int`, as Haskell/Rust/Scala typeclasses do. `Dyn[Show]` is the only path to per-element *dynamic* dispatch over a *foreign* type — both Rust and Swift attach an external dictionary at that existential boundary, the dictionary Hi already has. Until `Dyn` ships, pair payload + dictionary by hand in a one-field wrapper `class` (worked example in `comparison.md`).
@@ -1098,9 +1154,10 @@ A selection `recv.m` or chain step `recv .m` (§4.2) resolves `m` against the re
 - `struct` fields are primitives/`Ptr`/nested all-primitive structs only (checked on the declared, unboxed type).
 - Structural-record identity, field presence on `.`, type-preserving update over a fully-known base.
 - ADT `match` exhaustiveness and non-redundancy (errors).
+- Value-like types (`struct`, record, tuple, ADT) auto-derive structural `equals`/`hashCode`/`toString`; reference `class`es keep identity unless they override; user-declared members win (§7.16).
 - `|`/`&` restricted to reference types; intersection field-collision is an error; joins resolved by checked `<:`/`lub`.
 - Generic upper-bound (`<:`) and trait-bound (`:`) checks, then full erasure before NIR.
-- Traits are **Self-based**: the conformer is `Self`, parameters are auxiliary (§5.3, §6.10). Conformance is nominal (`<:`, `Self` = declaring type) or retroactive (`given Trait for Type`); a nominal `<:` also synthesizes a definition-site `given` so owned types satisfy `[A: Trait]` bounds. **Scope-based** resolution (most-specific in-scope wins; same-specificity tie = use-site ambiguity error; multiple conformances per `(Trait, type)` may coexist — Scala model, no global coherence). Single-applicable extension resolution; the tiered `.m` resolution order (§6.10).
+- Traits are **Self-based**: the conformer is `Self`, parameters are auxiliary (§5.3, §6.10). Conformance is nominal (`<:`, `Self` = declaring type) or retroactive (`given Trait for Type`); a nominal `<:` also synthesizes a definition-site `given` so owned types satisfy `[A: Trait]` bounds. **Scope-based** resolution (most-specific in-scope wins; same-specificity tie = use-site ambiguity error; multiple conformances per `(Trait, type)` may coexist — Scala model, no global coherence). A `given`/`extension` enters scope from its own module, the **companion scope** of the trait or conforming type (no import), or an explicit import — **by name** (named `given`/`extension`) or **`import p.given`** (the contextual wildcard); `import p.*` carries extensions but **not** givens (§6.10). Single-applicable extension resolution; the tiered `.m` resolution order (§6.10).
 
 ---
 
@@ -1289,7 +1346,7 @@ Lowering uses NIR landing pads (`Next.Unwind`), dispatching the caught value thr
 ### 7.12 Loops: `while` and `for`
 
 - **`while c do e`** evaluates `c : Bool`; while it is `true`, evaluates `e` (value discarded) and re-tests. Result type `Unit`. Lowering: a header block testing `c` (`Inst.If`) and a body block ending in a back-edge `Inst.Jump` to the header; mutable locals are `Op.Var` slots (§8.1), so no phi-threading is required.
-- **`for x in e do body`** is **pure sugar**, desugared before typing to `e.foreach { x => body }`. It therefore works for any receiver whose type has a `foreach` method or extension of type `(T -> Unit) -> Unit` — no collections library required. Result type `Unit`. Multiple generators, guards, pattern binders, and `for … yield` are deferred to the collections milestone (§2.2).
+- **`for x in e do body`** is **pure sugar**, desugared before typing to `e.foreach { x => body }`. It therefore works for any receiver whose type has a `foreach` method or extension of type `(T -> Unit) -> Unit`. **In the MVP this includes `Array[T]`**, whose built-in `foreach` intrinsic (§6.2) makes `for x in xs do …` iterate arrays with no collections library; user types that define a `foreach` work identically. Result type `Unit`. Multiple generators, guards, pattern binders, and `for … yield` are deferred to the collections milestone (§2.2).
 - **`break`/`continue` do not exist** in the MVP (keywords reserved, §3.5); exit early with `return`, a flag `var`, or restructuring.
 - **No tail-call guarantee.** Hi does not guarantee tail-call elimination (Interflow may inline or optimize, but it is not a language guarantee). Use `while`/`for` for unbounded iteration; recursion is for naturally tree-shaped or bounded-depth structure.
 
@@ -1340,6 +1397,7 @@ fun indexOf (xs: Array[Int]) (x: Int): Int = {
 | `recv.m args` | `recv`, then args L-to-R, then dispatch |
 | `lhs .m args` | `lhs`, then args L-to-R, then dispatch; result is next receiver |
 | construction (constructor application) / update | base (if any), then inits L-to-R, then build |
+| interpolated string `"…${e}…"` | holes L-to-R in source order, interleaved with literal chunks; then concatenate (§8.11) |
 | `throw e` | `e`, then unwind (no later siblings) |
 | `try e catch { … }` | `e`; on throw, clauses top-to-bottom |
 
@@ -1347,7 +1405,7 @@ fun indexOf (xs: Array[Int]) (x: Int): Int = {
 
 - **Arithmetic** `+ - * / %` is defined on operands of one matching numeric primitive type (no implicit widening, §6.2). Integer arithmetic wraps (two's complement, JVM-style). Integer `/`/`%` with a zero divisor throws `ArithmeticException`: the backend's `Lower` already inserts the divisor check (`checkDivisionByZero` → `throwDivisionByZero`), so Hi inherits this with no frontend work. Float arithmetic is IEEE-754; `NaN`/`±Inf` propagate and nothing throws.
 - **Relational** `< <= > >=` apply to numeric primitives and `Char` only; they do not chain (§4.1).
-- **Equality `==`/`!=` (judgment call, interim).** On primitives: value comparison (`Op.Comp(Ieq/Feq)`). On value `struct`s: structural field-wise equality (§6.3). On reference types: **null-safe `equals` dispatch** — `a == b` lowers to "if `a` is the null reference, test whether `b` is too; otherwise `Op.Method`-dispatch `java.lang.Object.equals`" (the Scala/Kotlin rule). Reusing javalib means `String` compares by content and box classes by value for free; a class that does not override `equals` inherits identity comparison from `Object`. Auto-derivation of `equals`/`hashCode`/`toString` for classes/records/ADTs remains Open Decision §11.3. Comparing a value type against a reference type is a compile error; reference-*identity* comparison has no operator surface in the MVP.
+- **Equality `==`/`!=`.** On primitives: value comparison (`Op.Comp(Ieq/Feq)`). On value `struct`s: structural field-wise equality (§6.3, §7.16). On reference types: **null-safe `equals` dispatch** — `a == b` lowers to "if `a` is the null reference, test whether `b` is too; otherwise `Op.Method`-dispatch `java.lang.Object.equals`" (the Scala/Kotlin rule). Reusing javalib means `String` compares by content and box classes by value for free; records/ADTs carry an **auto-derived** structural `equals` (§7.16), while a plain `class` that does not override `equals` inherits identity comparison from `Object`. Comparing a value type against a reference type is a compile error; reference-*identity* comparison has no operator surface in the MVP.
 - **Bitwise & shifts** (integer primitives). Provided as built-in chain-selection methods on all integer primitive types. The binary methods lower to a single `Op.Bin` node; the unary `.not` has **no dedicated `Bin` op** and lowers to an XOR against an all-ones constant (exactly as the Scala Native plugin lowers `~x`):
 
   | Method | Operation | NIR lowering | Example |
@@ -1363,6 +1421,24 @@ fun indexOf (xs: Array[Int]) (x: Int): Int = {
   > **Grounding.** The `Bin` cases are `And`/`Or`/`Xor`/`Shl`/`Ashr` (arithmetic right shift)/`Lshr` (logical right shift) in `nir/.../Bins.scala`; there is no `Bin.Not`. The Hi names `.shr`/`.ushr` follow the Java/`>>`/`>>>` convention and map onto `Ashr`/`Lshr` respectively.
 
   These methods are recognized by the compiler as intrinsics and are always available on all integer primitive types without an explicit import or extension definition. The `^` operator (level 7) is the infix XOR spelling; to keep operator and method coverage identical it applies to **all integer primitive types** (not only `Int`/`Long`), and `.xor` is its method-based equivalent consistent with `.and`/`.or`.
+
+### 7.16 Derived members: `equals`, `hashCode`, `toString` (decided)
+
+Hi **auto-derives** value-equality, hashing, and string conversion for the structurally-defined, value-like types, and leaves reference `class`es with identity semantics — mirroring Scala's `case class` vs. plain `class` split. These derived members are what make `==` (§7.15), hash-based collections, and string interpolation (§3.6) work with no boilerplate, and they resolve the former Open Decision §11.3.
+
+| Type kind | `equals` / `==` | `hashCode` | `toString` |
+|---|---|---|---|
+| `struct` (value) | structural, field-wise (§7.15) | from fields | `"TypeName(f1 = v1, …)"` |
+| structural record | structural over the field-set | from fields | `"(f1 = v1, …)"` |
+| tuple (a record, §6.5) | structural | from fields | `"(v1, v2, …)"` |
+| ADT (sealed variants) | structural per variant (tag + payload) | from tag + payload | `"Ctor(args)"`; a nullary variant → its bare name |
+| `class` (reference) | **identity** (`Object.equals`) | identity (`Object.hashCode`) | `Object`'s default (`Type@hex`) |
+
+- **User override wins.** Declaring `fun equals (o: Object): Bool`, `fun hashCode: Int`, or `fun toString: String` as a member replaces the derived/inherited one; `==`, hashing, and interpolation always route through whichever member is in effect. (For an anonymous structural record, override via a `toString` extension or wrap it in a named `struct`/`class`.)
+- **Consistency contract.** A derived `equals`/`hashCode` pair is mutually consistent (equal values hash equally), so structurally-equal records/structs/ADT values compare `==` *and* behave correctly as hash keys — the property the structural-record (§6.4) and value-struct (§6.3) features depend on, and which was previously unspecified.
+- **Reference `class`es keep identity** deliberately: they have identity and mutable `var` fields (§6.3), and auto-deriving structural equality over mutable state is the classic footgun. For a value-equality aggregate, reach for a `struct`/record/ADT, or override the three members explicitly. (`String`, box classes, and other javalib types keep their own `equals`/`toString`.)
+
+**Lowering.** For reference types (records, ADTs, and any class that overrides them), the three are virtual `Defn.Define`s overriding `java.lang.Object`'s `equals(Object)Bool` / `hashCode()Int` / `toString()String`, so javalib `String.valueOf`, the `==` dispatch (§7.15), and hash collections pick them up with **no** special-casing. For value `struct`s — not `Object` subclasses, no vtable — the three are **static** synthesized functions the compiler calls at `==`, `.toString`, `.hashCode`, and interpolation sites (exactly how struct `==` is already realized, §7.15). A derived record/ADT `toString`/`hashCode`/`equals` recurses through each field via that field's own member (`String.valueOf` for a primitive/`Object` field), and is emitted as one of the front-end's non-trivial lowerings (§8.10).
 
 ---
 
@@ -1479,9 +1555,10 @@ Module access and lazy init are provided by the backend (`Generate.genModuleAcce
 
 ### 8.8 Conformance → dictionary passing (`given Trait for Type`, `[A: Trait]` bounds)
 
-- A `given Trait for Type` lowers to a **dictionary**: an ordinary value of type `Type.Ref(Trait)` (a synthesized class/module implementing the erased `Trait`), reached via `Op.Module` when it is a singleton. Its methods operate on the `for`-type `Self` (unboxing a primitive `Self` like `Int` at the boundary, §8.9).
-- A **nominal `<:` conformance** also yields the `given` for its `(trait, type)` (§6.10): the front end synthesizes a stateless singleton `Defn.Module` implementing `Trait` whose members forward to the receiver's itable methods (each body is an `Op.Method` virtual dispatch on the passed `Self`). This is the dictionary a `[A: Trait]` bound finds when `A` is that owned type; it adds no new NIR shapes.
+- A `given Trait for Type` lowers to a **dictionary**: an ordinary value of type `Type.Ref(Trait)` (a synthesized class/module implementing the erased `Trait`), reached via `Op.Module` when it is a singleton. An **instance** member operates on the `for`-type `Self`, passed as the dictionary method's first parameter (unboxing a primitive `Self` like `Int` at the boundary, §8.9). A **`static` (associated) member** takes **no `Self` parameter** — `static fun empty: Self` lowers to a dictionary method `Sig.Method("empty", Seq(<Self-erased>), …)` with no receiver slot, returning the `for`-type value directly.
+- A **nominal `<:` conformance** also yields the `given` for its `(trait, type)` (§6.10): the front end synthesizes a stateless singleton `Defn.Module` implementing `Trait`. Each **instance** member forwards to the conforming type's itable (its body is an `Op.Method` virtual dispatch on the passed `Self`). Each **`static` member forwards to the conforming type's *static* member** instead — a direct `Op.Call` of `Type`'s `static fun` (a `Sig.Scope.PublicStatic` method, no receiver), since an associated member has no `Self` to dispatch on and therefore **cannot** be an itable entry. (This is the one place a `static` member diverges from the instance-forwarding rule: itable dispatch needs a receiver; statics are resolved on the *named* type.) The result is the dictionary a `[A: Trait]` bound finds when `A` is that owned type; it adds no new NIR shapes.
 - A **`[A: Trait]` bound** (and any explicit `using`) lowers to an **extra dictionary parameter** in the flattened signature: `fun max[A: Ord] (x: A) (y: A): A` → `Defn.Define` of `Type.Function(Seq(<self>, A-erased, A-erased, Type.Ref(Ord)), A-erased)`, the `Ord` dictionary appended positionally. The front end resolves it by the scope-based search (§6.10) and passes it; a conditional `given [A: Show] Show for List[A]` recursively threads the `Show for A` dictionary it requires.
+- **Type-qualified calls to associated members** (`A.empty`, `Int.empty`, §6.10) lower to a method call on the in-scope dictionary for `(Trait, A)` — `Op.Method` on the threaded `[A: Trait]` dictionary when `A` is a type variable, or a direct `Op.Call`/`Op.Module` access of the resolved `given`'s static method when the qualifier is a concrete type. There is no receiver value; the qualifier names *which conformance*, not a `Self` instance.
 - Calls through a dictionary (`o.lt a b`, or `a .lt b` resolved at tier 3) are `Op.Method` dispatch on the trait `Type.Ref` (or a static `Op.Call` if monomorphized). Type-parameter slots erase to `Rt.Object` with box/unbox at boundaries (§6.8).
 
 No runtime implicit search; resolution is entirely compile-time. *(When the deferred `Dyn[Trait]` lands, an existential value lowers to a synthesized `Defn.Class` holding the payload plus this same dictionary — no new NIR; see §2.2, §6.10.)*
@@ -1508,14 +1585,26 @@ Because Hi is the in-repo module compiled against `tools`, it is always NIR-form
 3. **Structural-record canonicalization** (§8.6) — deterministic cross-unit naming via sorted-signature hash and canonical layout, plus intersection-merge diagnostics (§8.4).
 4. **Value-struct/GC safety enforcement** (§8.2) — a front-end well-formedness pass forbidding managed refs (incl. box classes) inside `struct`s.
 5. **Module cyclic-init diagnostic** (§8.5) — static dependency-graph cycle detection (the only mechanism).
+6. **Derived `equals`/`hashCode`/`toString`** (§7.16) — virtual overrides for records/ADTs/value-equality classes; static synthesized functions for value `struct`s; recursive field rendering.
+7. **String interpolation** (§3.6, §8.11) — lexing `"…${e}…"` into chunks + holes and lowering to `String`-concatenation via `String.valueOf` per hole.
 
 Everything else (saturated calls, class/field/ctor emission, modules, entry point, runtime-symbol references) is a direct, mechanical construction of existing `nir.Defn`/`nir.Op` shapes.
+
+### 8.11 String interpolation → `String.valueOf` + concatenation
+
+An `interp_string` (§3.6, §5.6) — alternating literal **chunks** and expression **holes** — lowers to ordinary `java.lang.String` construction, reusing the exact NIR the Scala Native plugin emits for `s"…"`:
+
+- Each literal chunk is an interned `Val.String` (a `Defn.Const`/`Rt.String` instance, §8.9).
+- Each hole `${ e }` is evaluated in source order, then rendered to a `String` by `java.lang.String.valueOf` — the `Object` overload for reference values (which calls the value's `toString`, including the derived ones of §7.16) and the primitive overloads for `Int`/`Double`/`Char`/`Bool`/… (no boxing needed). A `null` reference renders `"null"` (javalib `valueOf` semantics).
+- The chunks and rendered holes are concatenated in order via the javalib path (`java.lang.StringBuilder.append` chain, or `String.concat` for the two-piece case) — whichever the backend already uses for Scala `s"…"`.
+
+So `"point ${p.x},${p.y}"` lowers to `valueOf`/`append` calls on a `StringBuilder` seeded with `"point "`, and the result type is `String`. No new NIR, no new runtime symbol — interpolation is pure front-end desugaring over existing javalib members, pruned by the linker like any other reference. A plain `STRING_LIT` (no holes) skips all of this and is a single interned `Val.String` as before.
 
 ---
 
 ## 9. Example Programs
 
-Six complete programs using only locked features and kept conventions. Output uses Hi's minimal standard library **`std.io`** (§10.2): `println (line: String): Unit` and the curried `printf (fmt: String) (args: Array[Object]): Unit`, whose format semantics are `java.util.Formatter`'s. Arguments are passed as **one array literal** (the varargs idiom, §5.6) — inside the brackets, elements are full comma-separated expressions and primitives box against `Array[Object]` (§6.8). Raw libc and `c"..."` remain available for FFI but are not used here. Statements are newline-terminated (§3.4); a block's last expression is its value; an application result used as a (non-bracketed) argument is parenthesized (§4.3).
+Six complete programs using only locked features and kept conventions. Output uses Hi's minimal standard library **`std.io`** (§10.2): `println (line: String): Unit` and the curried `printf (fmt: String) (args: Array[Object]): Unit`, whose format semantics are `java.util.Formatter`'s. Most examples prefer **string interpolation** (`println "x = ${e}"`, §3.6) for readability; `printf` is shown where field/precision formatting or the array-varargs idiom is the point. Interpolation holes render via `toString`/`String.valueOf` (§7.16, §8.11) with no format string to keep in sync; `printf` arguments are passed as **one array literal** (the varargs idiom, §5.6) — inside the brackets, elements are full comma-separated expressions and primitives box against `Array[Object]` (§6.8). Raw libc and `c"..."` remain available for FFI but are not used here. Statements are newline-terminated (§3.4); a block's last expression is its value; an application result used as a (non-bracketed) argument is parenthesized (§4.3).
 
 > **Style recommendation (not a grammar rule).** Single-field ADT variants use positional payloads (`Num(2.0)` / `Num(n)`); multi-field variants use named record payloads (`Add(l = …, r = …)`).
 
@@ -1626,7 +1715,7 @@ object Main {
 ```hi
 package examples.chains
 
-import std.io.printf
+import std.io.println
 
 trait Show {                         // Self-based: Self = the conforming type; receiver implicit
   fun show: String
@@ -1647,22 +1736,22 @@ object Main {
     // chain selection ' .m' at application precedence, left-associative:
     //   3.add 4 .times 5 .neg  ===  call structure ((3.add 4).times 5).neg
     val chained = 3.add 4 .times 5 .neg          // -35
-    printf "chain = %d\n" [chained]
+    println "chain = ${chained}"
 
     // multi-line chains continue on a leading '.' (§3.4 rule 3):
     val chained2 =
       3.add 4
         .times 5
         .neg
-    printf "chain2 = %d\n" [chained2]
+    println "chain2 = ${chained2}"
 
     val s = 3 .show                              // tier-3 .m resolution: trait method via given Show for Int
-    printf "shown = %s\n" [s]
+    println "shown = ${s}"
 
-    // bitwise operations via chain-selection methods (§7.15):
+    // bitwise operations via chain-selection methods (§7.15); holes may contain any expression:
     val flags = 0b0011
     val mask  = 0b0101
-    printf "or=%d and=%d shl=%d\n" [flags .or mask, flags .and mask, flags .shl 2]
+    println "or=${flags .or mask} and=${flags .and mask} shl=${flags .shl 2}"
   }
 }
 ```
@@ -1684,7 +1773,7 @@ object Main {
 ```hi
 package examples.classes
 
-import std.io.printf
+import std.io.println
 
 class Animal (name: String) {
   fun speak: String = "..."                 // receiver implicit; `self : Animal` in scope
@@ -1706,13 +1795,13 @@ object Main {
     val rex: Animal = Dog(name = "Rex")
     val mimi: Animal = Cat(name = "Mimi")
 
-    // Dynamic dispatch on the runtime class of each receiver:
-    printf "%s says %s\n" [rex.name, rex.speak]     // 'rex.speak' is nullary selection
-    printf "%s says %s\n" [mimi.name, mimi.speak]
+    // Dynamic dispatch on the runtime class of each receiver, via interpolation:
+    println "${rex.name} says ${rex.speak}"          // 'rex.speak' is nullary selection
+    println "${mimi.name} says ${mimi.speak}"
 
     val t0 = Tally(count = 0)
     val t1 = t0 with (count = t0.count + 1)
-    printf "tally t0=%d t1=%d\n" [t0.count, t1.count]
+    println "tally t0=${t0.count} t1=${t1.count}"
   }
 }
 ```
@@ -1722,7 +1811,7 @@ object Main {
 - `<: Animal(name)` is a super-constructor call (§5.3, §8.2) supplying `name` to `Animal`'s ctor.
 - `Tally` holds only an `Int`, legal under the value-struct rule; `t0 with (count = …)` builds a fresh `Tally`, and `t0.count` still reads `0`.
 - A `name: String` field is legal on the **class** (heap, precise RTTI) but would be **rejected inside `struct Tally`** (§6.3).
-- `%s` with managed `String`s is fine: `std.io.printf` formats in Hi/javalib, not in C.
+- The `${…}` holes render via each value's `toString`/`String.valueOf` (§7.16, §8.11): `${rex.name}` is a `String` (no conversion), `${t0.count}` renders the `Int` with no boxing. Interpolation runs in Hi/javalib, not in C.
 - Output:
   ```
   Rex says woof
@@ -1912,7 +2001,7 @@ The following are genuine choices still left to the language designer. (Items th
 
 2. **Numeric conversions.** With no implicit widening, the exact set and naming of explicit conversion methods (`toLong`, `toDouble`, …) and whether unsigned/`Size`/`Ptr` arithmetic is exposed is unspecified.
 
-3. **`equals`/`hashCode`/`toString` and structural equality semantics.** Structs are defined to have structural equality and records a canonical layout, but the surface contract for value equality, hashing, and string conversion of classes/records/ADTs (auto-derived vs. user-provided) is open.
+3. ~~**`equals`/`hashCode`/`toString` and structural equality semantics.**~~ **Decided (§7.16).** Value-like types (`struct`, structural record, tuple, ADT) auto-derive structural `equals`/`hashCode` and a canonical `toString`; reference `class`es keep `Object` identity unless they override the members. A user-declared `equals`/`hashCode`/`toString` member always wins. This makes `==`, hash keys, and string interpolation (§3.6) work without boilerplate.
 
 4. **Visibility / access control.** The spec distinguishes "public/top-level" from "local" for inference purposes but defines no `private`/`internal` modifier surface or module-visibility rules.
 
@@ -1929,6 +2018,27 @@ The following are genuine choices still left to the language designer. (Items th
 ## Changelog
 
 *Newest first. Each entry is a delta against the previous spec version; `§` references point into the sections above. New versions append a `###` subsection here.*
+
+### v0.6 (from v0.5)
+
+*Closes the implementation-readiness gaps the v0.5 Self-based/implicit-receiver pivot left in the **grammar** and **lowering**, plus three elegance features that move Hi toward its "more expressive than Go" goal: string interpolation, derived value-semantics members, and array iteration.*
+
+**Correctness fixes (the v0.5 pivot was propagated through prose but not the formal sections):**
+
+- **`static` is now in the grammar.** `fun_decl` gains an optional `"static"?` modifier, so `static fun empty: Self` (added as a keyword in v0.5) is actually derivable. Legal only in `trait`/`class`/`object`/`given` bodies; rejected at top level, in blocks, in `struct`/`extension` bodies. (§5.3)
+- **`self` is now an expression.** Making `self` a keyword in v0.5 removed its derivation (it was previously a `LOWER_ID` parameter). `self` is added as a `primary`, a `call_arg`, and a `BoundedArg`, so `self + self`, `self .lt o`, `self.name`, `f self` parse. (§4.3, §5.5, §5.6)
+- **Associated-member lowering specified, and the §8.8 "forward to itable" invariant corrected.** A `static` member has **no receiver**, so it cannot be an itable entry: a nominal `<:` synthesizes a dictionary whose *instance* members forward to the itable but whose *`static`* members forward to the conforming type's **static** member (a `PublicStatic` `Op.Call`). Type-qualified calls (`Int.empty`, `A.empty`) lower to the in-scope dictionary's no-receiver method. (§5.3, §8.8)
+- **Type variables are unambiguously `UPPER_ID`.** §3.3 and §5.9 previously listed/permitted lowercase type variables, contradicting `type_param ::= UPPER_ID` and every example. The LOWER_ID type-variable branch and list entry are removed. (§3.3, §5.9)
+- **Existential object-safety rule added.** Because Self-based traits put `Self` in argument/return positions, a bare `Trait`/`Dyn[Trait]` existential is now restricted to **existential-eligible** traits (`Self` in receiver position only, no `static` members, no per-method type params) — Rust's object safety / Swift's Self-requirement rule. `Array[Ord]` is now correctly rejected; `Array[Show]` still works. (§5.9, §6.10)
+
+**Elegance features (toward the language goal):**
+
+- **String interpolation in the MVP.** Plain `"…${ expr }…"` and the `$path` shorthand splice values rendered by `toString`/`String.valueOf`; `\$` escapes a literal dollar; `c"..."` stays raw. No format specifiers (use `printf`). Lexed structurally into the `interp_string` primary and lowered to javalib `String.valueOf` + concatenation — **no new NIR**. Most §9/comparison examples switch to it. (§2.1, §3.6, §5.6, §7.14, §8.10, §8.11, §9.4, §9.5)
+- **Derived `equals`/`hashCode`/`toString` — Open Decision §11.3 resolved.** Value-like types (`struct`, structural record, tuple, ADT) auto-derive structural equality/hashing and a canonical `toString` (Scala `case class` style); reference `class`es keep `Object` identity unless they override the members; a user-declared member always wins. This is what makes `==`, hash keys, and interpolation work without boilerplate. (§6.11, §7.15, §7.16, §8.10, §11.3)
+- **`Array[T].foreach` intrinsic.** A counted-index-loop `foreach` is in the MVP (distinct from the still-deferred `map`/`filter`/`fold` collections API), so `for x in xs do …` iterates arrays out of the box. (§2.2, §6.2, §7.12)
+- **Import & scoping of `given`/`extension` specified (was an undefined gap).** A contextual definition enters scope from its own module, the **companion scope** of the trait or conforming type (no import), or an explicit import: **by name** or the **`import p.given`** contextual wildcard. `import p.*` carries extensions but **not** givens (so a wildcard can't silently change resolution). `extension` gains an **optional name** (`extension nums: Int { … }`, like `given_name`) for by-name import; naming is optional like a lambda's. Multi-type relations (`Convert[A, B]`) are `Trait[aux…] for Self`. (§5.2, §5.3, §6.10, §6.11)
+
+**Changelog hygiene:** the v0.3 entries describing the since-reversed `given`-uniqueness coherence rule and the `dyn Show`/explicit-`self` spellings are marked superseded.
 
 ### v0.5 (from v0.4)
 
@@ -1961,8 +2071,8 @@ The following are genuine choices still left to the language designer. (Items th
 ### v0.3 (from v0.2)
 
 - **One-armed `if` (`else` now optional).** `else` may be omitted when the then-branch is `Unit` (`if c then e` ≡ `if c then e else ()`), enabling guard clauses like `if a > 10 then return`; a non-`Unit` value still requires both branches, so the LUB stays defined. `else` binds to the nearest `then`. (§2.1, §3.5, §5.4, §7.4)
-- **Clarify `self` and `dyn`.** Bare `self` (unannotated) is documented as idiomatic, with the rationale for explicit-`self` over implicit `this` (parameter-based traits; associated/multi-param members). A trait used as a type is split: `Array[Show]` is nominal subtyping (works today), `Array[dyn Show]` is the deferred existential, and coercion into `dyn` is implicit/type-directed (no `as`). (§2.2, §5.3, §6.10)
-- **`impl` removed; one typeclass mechanism.** The Rust-borrowed `impl Trait for Type` form is gone — it was a second surface over the same dictionary search as `given`, strictly *less* expressive (no conditional instances), and required the "`impl` first, then `given`" tie-break. Trait satisfaction now has exactly two paths: *nominal* at the definition via the `<:` clause (dynamic dispatch via itable, owned types) and *retroactive* via `given` (dictionary, foreign/value/primitive types, conditional instances). Coherence — `impl`'s one real guarantee — is recovered as a **closed-world `given` uniqueness** rule (one per `(Trait, type-head)`), checkable thanks to the closed-world linker. The `impl` keyword is dropped from the reserved set. (§2.1, §3.5, §5.2, §5.3, §6.10, §6.11, §8.8, §9.4)
+- **Clarify `self` and `dyn`.** *(Partly superseded by v0.5: the explicit-`self`-parameter and prefix-`dyn Show` spellings were both reversed — v0.5 uses an **implicit** receiver and the bracketed `Dyn[Show]`. The trait-as-type *split* survives.)* Bare `self` (unannotated) is documented as idiomatic, with the rationale for explicit-`self` over implicit `this` (parameter-based traits; associated/multi-param members). A trait used as a type is split: `Array[Show]` is nominal subtyping (works today), `Array[dyn Show]` is the deferred existential, and coercion into `dyn` is implicit/type-directed (no `as`). (§2.2, §5.3, §6.10)
+- **`impl` removed; one typeclass mechanism.** The Rust-borrowed `impl Trait for Type` form is gone — it was a second surface over the same dictionary search as `given`, strictly *less* expressive (no conditional instances), and required the "`impl` first, then `given`" tie-break. Trait satisfaction now has exactly two paths: *nominal* at the definition via the `<:` clause (dynamic dispatch via itable, owned types) and *retroactive* via `given` (dictionary, foreign/value/primitive types, conditional instances). ~~Coherence — `impl`'s one real guarantee — is recovered as a **closed-world `given` uniqueness** rule (one per `(Trait, type-head)`), checkable thanks to the closed-world linker.~~ *(Superseded by v0.4/v0.5: resolution is **scope-based**, no global uniqueness — multiple conformances per `(Trait, type)` may coexist, §6.10.)* The `impl` keyword is dropped from the reserved set. (§2.1, §3.5, §5.2, §5.3, §6.10, §6.11, §8.8, §9.4)
 - **Unified `.m` resolution order.** `recv.m` / `recv .m` resolves in a fixed three-tier order — (1) intrinsic/itable member, (2) in-scope `extension`, (3) trait method witnessed by an in-scope `given` — with ambiguity *within* a tier an error. This makes the prior "methods/extensions on the receiver's type" prose precise and gives `3 .show`-style trait calls a defined meaning without `impl`. (§4.2, §6.10)
 - **Traits get default methods; `fun` bodies are optional.** `fun_decl`'s body is now optional: bodiless ⇒ abstract member (`Defn.Declare`, trait-only), with-body ⇒ concrete. A concrete trait member is a *default method* — yielding Swift "protocol-extension defaults" while dispatching through the same mechanism as any trait member (no Swift-style static/dynamic split). (§5.3, §6.10)
 - **`extension` is pure static sugar.** Extension bodies hold only `fun` members (the incoherent `val` member is removed — extensions add no storage); conformance is deliberately *not* expressible via `extension` (unlike Swift), avoiding the static-vs-dynamic dispatch hazard. `using`-constrained extensions are deferred. (§5.3, §6.10, §2.2)

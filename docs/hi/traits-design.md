@@ -161,6 +161,8 @@ val z = Int.empty                                             // associated memb
 
 Because `?` quantifies a parameter and `Dyn` the conformer, they compose: `Dyn[Collection[?]]`.
 
+The two **existential** forms (bare `Trait`, `Dyn[Trait]`) require the trait to be **existential-eligible** — `Self` only as the receiver, no `static` members, no per-method type params (Rust *object safety* / Swift's Self-requirement rule). `Show`/`Collection[T]`/`Convert[B]` qualify; `Ord` (`lt (o: Self)`) and `Clone` (`clone: Self`) do not, and are used only via `[A: Trait]` bounds. Normative rule in [spec §5.9](spec.md)/[§6.10](spec.md).
+
 ---
 
 ## 7. Migration map (parameter-based → Self-based)
