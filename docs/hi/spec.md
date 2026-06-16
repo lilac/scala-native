@@ -1,4 +1,4 @@
-# Hi Language Specification — v0.6
+# Hi Language Specification — v0.7
 
 > A statically-typed, expression-oriented, native-compiled language implemented as a new frontend that emits Scala Native's NIR and reuses the entire Scala Native backend.
 
@@ -106,14 +106,14 @@ This table is the authoritative MVP feature boundary. "Judgment call" rows mark 
 
 | Area | In MVP | Notes / Lowering |
 | --- | --- | --- |
-| Bindings | `val`, `var` | `val` immutable (default). `var` **is in the MVP** but kept minimal: a mutable **local** binding only. **Class/struct fields may also be `var`. Object/module-level `var` fields are deferred** (model module mutable state as a `class` with a `var` field). *Judgment call:* `var` plus `while`/`for` (§7.12) cover imperative iteration and accumulators. |
+| Bindings | `val`, `var` | `val` immutable (default). `var` is a mutable binding: **local** bindings, **class/struct fields**, and **`object`/module-level fields** may all be `var` (§7.2, §8.5). Module-level `var` lowers to a `Defn.Var` field on the module singleton plus a setter — the same shape as an `object` `val` field, which already ships — and is **unsynchronized after lazy init** (like a Scala `object var` or a Go package-level variable). *Judgment call:* `var` plus `while`/`for` (§7.12) cover imperative iteration and accumulators. |
 | Functions | named `fun` (curried, multi-param-list); nullary `fun` permitted | Saturated call → single flat `Defn.Define`; under-application / bare `recv.m` on a non-nullary method → eta-expanded closure. A **nullary** method/getter (zero remaining argument lists) is always saturated and invoked by selection. |
 | Lambdas | `{ x => e }`, `{ (x, y) => e }`, `{ (x: Int, y: String) => e }` | Closures only; `fun` is never used for lambdas. *Judgment call:* multi-param closures use a parenthesized list, are **uncurried** (a single N-arg function object, tuple-applied), distinct from curried `fun`. |
 | Declaration kinds | `object`, `trait`, `type` (aliases + ADTs), `struct`, `class`, `extension`, `given` | Map to `Defn.Module`/`Defn.Trait`/`Defn.Class` plus `Defn.Define`s. Traits are **Self-based** (implicit conformer `Self` + auxiliary params, §5.3/§6.10). There is **no** `impl` keyword: a type conforms either *nominally* at its definition via the `<:` clause (dynamic dispatch, owned types) or *retroactively* via `given Trait for Type` (dictionary, foreign/value types). See §6.10. |
 | Value vs reference types | `struct` (value), `class` (reference) | `struct`: no identity, no inheritance; fields limited to primitives, `Ptr`, and nested all-primitive/`Ptr` structs (§6.3). `class`: heap, identity, single inheritance + traits, participates in `<:`. |
 | ADTs | sealed variants `type Option[A] = \| Some(A) \| None` (paren payloads) | Lower to a reference-backed tagged **class** hierarchy (sealed base `class` + case subclasses); `match` → class-id range-test decision tree. |
 | Pattern matching | `e match { \| pat => e2 … }` (postfix, braced arm-block), exhaustiveness checking | Sealed-ADT exhaustiveness is a **compile error** (§6.7, §7). Postfix `match`; braces delimit the arms (§5.4). |
-| Control flow | `if c then a else b`; one-armed `if c then a` allowed **iff `a : Unit`** (implicit `else ()`), the guard-clause form `if cond then return`; `while c do e` and `for x in e do body` loops; blocks `{ stmt* }` of newline-terminated statements; `return` = early exit from the enclosing `fun` | Expression-oriented; significant newlines (§3.1, §3.4). Block value = final expression statement, else `Unit`. Loops type to `Unit`; `for` desugars to `foreach` (§7.12). |
+| Control flow | `if c then a else b`; one-armed `if c then a` allowed **iff `a : Unit`** (implicit `else ()`), the guard-clause form `if cond then return`; `while c do e` and `for x in e do body` loops; loop `break`/`continue`; blocks `{ stmt* }` of newline-terminated statements; `return` = early exit from the enclosing `fun` | Expression-oriented; significant newlines (§3.1, §3.4). Block value = final expression statement, else `Unit`. Loops type to `Unit`; `for` desugars to `foreach` (§7.12), except where loop-local `break`/`continue` force the inline counted-loop form. |
 | Error handling | `throw expr`, `try e catch { \| Pattern => handler … }` | Exceptions only; maps to NIR unwind / `Throwable`. No `finally`. |
 | Tuples & records | tuples `(1, 2)`; named tuples `(x = 1, y = 2)`, one-field `(x = 1)`; structural record TYPES `(x: Int, y: Int)`, one-field `(x: Int)` | Structural identity = field-name set + types, order-independent, deterministic canonical layout. Trailing commas permitted, never required (§5.7). |
 | Functional update | `base with (field = v, …)` — for **records and structs** (value-like aggregates) | Type-directed sugar over a base of known static type; desugars to a fresh construction copying unchanged fields. **Not** on general `class`es — mutate a `var` field or model the data as a record/struct (§6.6). No row polymorphism. |
@@ -128,6 +128,7 @@ This table is the authoritative MVP feature boundary. "Judgment call" rows mark 
 | Runtime / stdlib reference | `java.lang.{Object,String,Class,Throwable,Thread}`, `scala.scalanative.runtime.*`, `scala.FunctionN`, primitive box classes, typed array classes | Referenced by canonical name from published nativelib/javalib/scalalib NIR; linker prunes to reachable set. |
 | Concurrency | OS threads (pthreads); virtual threads via javalib reuse | Closure→SAM conversion lets a Hi closure satisfy `Runnable`, so `Thread`/`Thread.ofVirtual` are ergonomically callable (§7.6, §9.6 note). |
 | Hi standard library (minimal) | `std.io.{print, println, printf}` | Hi-authored sources shipped with the compiler, compiled to NIR; delegate to javalib `System.out`/`String.format` (§10.2). `printf` takes `(fmt: String) (args: Array[Object])`; format semantics = `java.util.Formatter`. |
+| Hi collections (first-order facade) | `std.collections`: `List[A]` (a Hi ADT) + `Option[A]`, with `map`/`filter`/`foldLeft`/`foreach`/… as **extension methods**; `Array[A]` pipeline (`map`/`filter`/`foldLeft`) over the `foreach` intrinsic | Self-hosted in Hi — `List` is an ordinary ADT (§6.7), the pipeline is `extension` methods (§6.10), **all signatures first-order and invariant**, so it needs neither HKT nor variance. Stack-safe core ops. Lowers to plain Hi NIR — no new vocabulary. This is the MVP's demonstrable `xs.map(f).filter(p)` surface (§10.2). The *generic, variance/HKT-using, scalalib-backed* collections (`Map`/`Set`, container-polymorphic builders) remain deferred (§2.2). |
 
 ### 2.2 Out of Scope (explicitly deferred)
 
@@ -137,16 +138,16 @@ This table is the authoritative MVP feature boundary. "Judgment call" rows mark 
 | **Algebraic effects / user-defined effect handlers** | The backend *has* delimited continuations, but the MVP surface exposes none. Error handling is exceptions only. |
 | **Value-backed enums** | ADTs lower to a reference-backed tagged class hierarchy; unboxed/value-backed enum representations are deferred. |
 | **Value structs holding managed references** | GC safety rule: a managed ref embedded in a by-value struct that becomes a field of a heap object is not scanned precisely and may be collected prematurely. Stack-only value structs with refs would need per-shape RTTI; deferred. *Lift path (post-MVP):* recurse `MemoryLayout.referenceFieldsOffsets` into nested `StructValue`s (the GC markers already walk arbitrary offset arrays), or flatten ref-carrying structs into their containers in the frontend; `Array[struct-with-refs]` stays deferred either way (§6.3). |
-| **Higher-kinded types; variance; lower bounds** | Generics are first-order, invariant; type parameters take an upper `<:` bound and/or a trait `:` bound (§6.8). |
+| **Higher-kinded types; variance; lower bounds** | Generics are first-order, invariant; type parameters take an upper `<:` bound and/or a trait `:` bound (§6.8). Both are **frontend-only** (they erase before NIR — zero backend cost) and are designed-out, not dropped: **HKT** ([proposals/higher-kinded-types.md](proposals/higher-kinded-types.md) — the prerequisite for `Functor`/`Monad` and polymorphic collections; its one hard part is reconciling `Self : * -> *` with the implicit-receiver model) and **declaration-site variance** ([proposals/variance.md](proposals/variance.md) — `[+A]`/`[-A]`, with `Array` staying invariant). Lower bounds (`>:` reserved) ride along with variance. |
 | **Parameter wildcards `Generic[?]`** | Java/Scala use-site wildcards — `Collection[?]` ("a collection of *some* element type"), quantifying an *auxiliary* type parameter. The grammar reserves `?` as a wildcard type argument now (§5.9) so it is collision-free, but wildcard *checking* (capture, bounds) is deferred. Designed-from-start, not retrofitted: because traits are Self-based, `?` (over a parameter) never competes with `Dyn` (over the conformer). |
 | **`Dyn[Trait]` (existential trait objects)** | Retroactive *dynamic* dispatch on a type you do not own — an `Array[Dyn[Show]]` of mixed payloads. The principled replacement for Rust's `dyn`/Swift's `any`: an existential box pairing a payload with its resolved `given` dictionary, lowering to a synthesized `Defn.Class` (no new NIR). Distinct from the bare **nominal** existential `Show`: `Array[Show]` is plain nominal subtyping (holds values that conform via `<:`, no box) and already works; `Array[Dyn[Show]]` is the **boxed** existential that also admits retroactive `given` conformers and value/primitive types. Multi-trait objects reuse intersection: `Dyn[Show & Drawable]`. Coercion *into* `Dyn[Show]` is **implicit and type-directed** (no `as` cast) — assigning `[3, true, 7]` to an `Array[Dyn[Show]]` packs each element — keeping the cost visible in the type (the lesson behind Swift's `any`). `Dyn` is a compiler-known type constructor (like `Array`), so it needs no new grammar. Deferred because the owned-reference case is covered by bare `Show` + `<:`; until it ships, pair value + dictionary by hand in a one-field wrapper class. |
 | **Typeclass-keyed (conditional) extensions** (`extension (x: A) given (A: Show) { … }`) | Conditional/typeclass-keyed extension methods (Scala 3's `extension (x: A)(using …)`, Swift's `where`-constrained extensions). Deferred: typeclass-keyed methods surface through `trait` + `given` instead (the trait-method-via-conformance tier of `.m` resolution, §6.10), and plain `extension` stays unconditional. A clean future extension point. |
 | **Macros / compile-time metaprogramming** | No metaprogramming surface. |
-| **`async`/`await`; `break`/`continue`; non-local `return` from closures** | Concurrency is via OS threads and reused virtual threads — no built-in async surface. `while`/`for` and early-exit `return` are in the MVP (§7.12, §7.13); loop `break`/`continue` and `return` crossing a closure boundary are deferred (keywords reserved, §3.5). |
+| **`async`/`await`; non-local `return`/`break`/`continue` from closures** | Concurrency is via OS threads and reused virtual threads — no built-in async surface. `while`/`for`, early-exit `return`, and loop `break`/`continue` are **in the MVP** (§7.12, §7.13); what stays deferred is *non-local* control — `return`/`break`/`continue` crossing a **closure** boundary to target an outer `fun` or loop (§7.12, §7.13). |
 | **Implicit conversions** | `given`/`extension` provide contextual abstraction, but implicit *coercion* between unrelated types is not in the MVP. |
 | **Union/intersection over value structs** | Unions and intersections are restricted to reference types. |
 | **User-defined symbolic/backtick operators; indexing sugar `xs[i]`** | The operator lexicon is a fixed closed set. Array *literals* are in the MVP via the spaced-`[` rule (§5.6); *tight* `xs[i]` indexing remains reserved (it parses as type application and fails — by design). Use `xs.get i` (§6.2). |
-| **Idiomatic native collections API (`List`/`Array`/`Map` with `map`/`filter`/`fold`)** | **Decided-deferred.** Hi *will* offer a native collections surface, but it is to be **built on Scala Native's existing collection library** (reachable via the `scalalib` NIR Hi already links — see §10) rather than reinvented. Deferring it keeps the MVP a clean vertical slice; until it lands, only the ADT/recursion/loop forms of §9 are guaranteed expressible, and the fluent collection-pipeline from the original Hi tour is **not** part of the MVP examples. **Exception — `Array[T].foreach` is in the MVP** as a counted-loop intrinsic (§6.2), so `for x in xs do …` iterates arrays today (§7.12); the deferred part is the `map`/`filter`/`fold` pipeline, not basic iteration. |
+| **Generic / container-polymorphic collections (`Map`/`Set`; variance- & HKT-using collection hierarchy)** | **Decided-deferred** — narrowed in v0.7. A **first-order `List`/`Option`/`Array` pipeline is now in the MVP** (`std.collections`, §2.1, §10.2): self-hosted in Hi, first-order and invariant, so it needs neither HKT nor variance. What stays deferred is the *container-polymorphic* surface — `Map`/`Set`, builder/`CanBuildFrom`-style generic returns, and anything quantifying over the container or relying on declaration-site variance — because **scalalib's collection API is variance- and higher-kinded-heavy** (`IterableOps`, `CC[_]`), so reusing it directly requires [variance](proposals/variance.md) and [HKT](proposals/higher-kinded-types.md) first (verified against `scalalib`'s `collection.*`). The MVP facade is a clean, dependency-free slice; the scalalib-backed milestone lands once those two land. (`Array[T].foreach` remains an intrinsic counted loop, §6.2.) |
 
 ---
 
@@ -197,7 +198,7 @@ Statements are **newline-terminated**. A token filter between the lexer and the 
 > **Statement-termination rules (normative).**
 >
 > 1. **Suppression contexts (innermost delimiter wins).** Newline significance is decided by the *innermost* enclosing delimiter: inside `( )` and `[ ]`, newlines are plain whitespace — multi-line constructions `T(…)`, argument groups, and array literals need no continuation marks — while inside `{ }` bodies and at top level, each newline is a candidate terminator. A brace body nested within parentheses regains newline significance.
-> 2. **Continuation by previous token.** A candidate newline is suppressed when the previous token cannot end a statement: any infix or prefix operator, `,` `=` `=>` `.` `..` `:` `<:` `@`, an opening bracket, the arm bar `|`, or a keyword that requires a continuation (`if` `then` `else` `try` `catch` `with` `while` `for` `in` `do` `throw` `val` `var` `fun` `type` `import` `package` `using` `given` `extension` `struct` `class` `trait` `object`). (`return` *may* end a statement — a bare `return` returns `()`; its operand, if any, must start on the same line.)
+> 2. **Continuation by previous token.** A candidate newline is suppressed when the previous token cannot end a statement: any infix or prefix operator, `,` `=` `=>` `.` `..` `:` `<:` `@`, an opening bracket, the arm bar `|`, or a keyword that requires a continuation (`if` `then` `else` `try` `catch` `with` `while` `for` `in` `do` `throw` `val` `var` `fun` `type` `import` `package` `using` `given` `extension` `struct` `class` `trait` `object`). (`return`, `break`, and `continue` *may* end a statement — a bare `return` returns `()`, and `break`/`continue` take no operand; a `return` operand, if any, must start on the same line.)
 > 3. **Continuation by next token.** A candidate newline is suppressed when the next token cannot begin a statement: `then` `else` `match` `catch` `with` `in` `do` `=>` `=` `<:` `,` `)` `]` `}`, the arm bar `|`, any infix-only operator (`*` `/` `%` `^` `==` `!=` `<` `<=` `>` `>=` `&&` `||`), or a **leading `.`** (the multi-line chain form, §4.2). A line starting with `+` `-` `!` `(` `[` `{`, an identifier, a literal, or a statement-capable keyword begins a **new** statement.
 > 4. **Application never crosses a terminator.** The arguments of a whitespace application must lie on the same logical line as the callee. For a multi-line call, parenthesize the whole call (rule 1 then suppresses the inner newlines) or pass a brace-delimited closure/block whose `{` sits on the call line (braces self-delimit and may span lines).
 
@@ -235,12 +236,13 @@ run tasks
 ```
 val   var   do   return   fun   object   trait   type   struct   class
 extension   given   using   with   if   then   else   match   import   package
-throw   try   catch   while   for   in   true   false   self   static
+throw   try   catch   while   for   in   break   continue   true   false   self   static
 ```
 
 - `val`/`var` — immutable / mutable local binding; `fun` — function declarations. Statements are newline-terminated (§3.4) and any expression may stand as a statement.
 - `return` — **early exit** from the enclosing `fun` with the given value (`()` if omitted); type `Nothing` (§7.13). It never exits merely a block, and may not cross a closure boundary in the MVP.
 - `while c do e` / `for x in e do body` — loops (§7.12); **`do` introduces a loop body** (its only role).
+- `break` / `continue` — loop control (§7.12), valid only inside the body of an enclosing `while`/`for`: `break` exits the innermost loop, `continue` skips to its next iteration. Both take no operand, have type `Nothing`, and (like `return`) may not cross a closure boundary. Outside a loop, or inside a closure nested in a loop, they are a compile error.
 - `class`/`struct` — reference/value split. `struct` is a by-value aggregate restricted to primitives, `Ptr`, and nested such structs. A `class`/`object` declares the traits it conforms to *nominally* in its `<:` clause (§5.3), binding `Self` to itself; there is **no** `impl` keyword — retroactive conformance is `given Trait for Type` (§6.10).
 - `extension` — `extension T { ... }` (receiver is the implicit `self`, §5.3).
 - `given`/`using` — `given Trait for Type` declares a retroactive conformance (a dictionary); `using` introduces a general contextual parameter (typeclass requirements are normally the `[A: Trait]` bound, §5.3, §6.10). `for` (also the loop keyword) names the conforming type in a `given`.
@@ -255,8 +257,8 @@ throw   try   catch   while   for   in   true   false   self   static
 **Reserved-for-future keywords** (lexed as keywords, rejected by the parser with a "reserved for future use" diagnostic):
 
 ```
-enum   effect   handle   resume   break   continue
-yield   lazy   inline   mutable   as
+enum   effect   handle   resume   yield
+lazy   inline   mutable   as
 ```
 
 > **Reserved built-in type names.** `Self` (the conforming/enclosing type inside a trait/class/struct/given body, §5.3) and `Dyn` (the boxed existential type constructor `Dyn[Trait]`, deferred, §2.2/§6.10) are **built-in type names** (UPPER_ID), not lowercase keywords — users may not redeclare them. `dyn` (lowercase) is **not** reserved (the existential is the bracketed `Dyn[…]`). `?` is reserved as a wildcard type argument (`Collection[?]`, §5.9), with checking deferred (§2.2).
@@ -319,7 +321,7 @@ This is **the** precedence table (the grammar of §5 encodes exactly this; where
 | 9 | **Equality** | `==` `!=` | left (non-chaining) |
 | 10 | **Logical and** | `&&` | left (short-circuit) |
 | 11 | **Logical or** | `\|\|` | left (short-circuit) |
-| 12 | **Control / leaf forms (LOOSEST)** | `if … then … else …`, postfix `e match { … }`, `throw e`, `try e catch { … }`, `while … do …`, `for … in … do …`, `return e?` | n/a (unbounded; must be parenthesized to be an operand of 1–11) |
+| 12 | **Control / leaf forms (LOOSEST)** | `if … then … else …`, postfix `e match { … }`, `throw e`, `try e catch { … }`, `while … do …`, `for … in … do …`, `return e?`, `break`, `continue` | n/a (unbounded; must be parenthesized to be an operand of 1–11) |
 
 Notes:
 
@@ -598,7 +600,7 @@ An `extension Type { … }` body holds only `fun` members (no `val`): an extensi
 
 An extension may carry an **optional name** (`extension nums: Int { … }`), mirroring `given_name`. The name is purely a handle for **by-name import** (`import p.nums`) and disambiguation; it never participates in `.m` resolution (§6.10), which is by the receiver's static type as always. The leading `LOWER_ID ":"` is unambiguous because the extended `type` is `UPPER_ID`/`(`-led (a type is never a bare lowercase, §3.3), so one token of lookahead separates a name from the type. Naming is optional exactly like a lambda's: omit it for a local, single extension; add it when the extension must travel by name across modules (§6.10).
 
-The entry point is an `object_decl` named `Main` whose body declares `fun main (args: Array[String]): Unit = …` (a linker convention, not special grammar). **Object/module-level `var` fields are rejected in MVP** (§2, §6).
+The entry point is an `object_decl` named `Main` whose body declares `fun main (args: Array[String]): Unit = …` (a linker convention, not special grammar). **Object/module-level `var` fields are in the MVP** (§7.2, §8.5): they lower to a module `Defn.Var` + setter and are unsynchronized after lazy init.
 
 ### 5.4 Expressions — control & leaf forms
 
@@ -611,6 +613,8 @@ assign_expr ::= if_expr
              |  while_expr
              |  for_expr
              |  return_expr
+             |  break_expr
+             |  continue_expr
              |  infix_expr "=" assign_expr            // assignment: LHS an assignable var path
              |  infix_expr ( "match" arm_block )*      // bare expr, optionally POSTFIX-matched (lowest precedence)
 
@@ -626,6 +630,8 @@ while_expr  ::= "while" expr "do" expr                 // Unit; §7.12
 for_expr    ::= "for" LOWER_ID "in" expr "do" expr     // sugar for e.foreach { x => body }; §7.12
 return_expr ::= "return" expr?                         // early exit from the enclosing fun (§7.13);
                                                        // the operand, if any, starts on the same line
+break_expr    ::= "break"                              // exit the innermost enclosing loop (§7.12); type Nothing
+continue_expr ::= "continue"                           // skip to the next iteration of the innermost loop (§7.12)
 
 // 'match' is POSTFIX (Scala-style): the scrutinee is the preceding expression.
 // 'e match { … } match { … }' chains left-associatively. To match the result of a
@@ -851,8 +857,8 @@ Right-associativity of `->` and the layering union-looser-than-intersection-loos
 - User-defined effect handlers (only `throw`, `try … catch`).
 - Row-polymorphic / generic record update (no syntax).
 - Value-backed enums; value structs holding managed references.
-- `break`/`continue`; non-local `return` from closures; user symbolic operators; tight indexing sugar `xs[i]`.
-- Variance annotations and lower bounds on type parameters (upper `<:` and trait `:` bounds are in; §5.3, §6.8).
+- *Non-local* control: `return`/`break`/`continue` crossing a **closure** boundary; user symbolic operators; tight indexing sugar `xs[i]`. (Loop-local `break`/`continue` *are* in the MVP — §5.4, §7.12.)
+- Variance annotations and lower bounds on type parameters (upper `<:` and trait `:` bounds are in; §5.3, §6.8). *Declaration-site variance is a planned post-MVP feature — see [proposals/variance.md](proposals/variance.md).*
 
 ---
 
@@ -912,13 +918,27 @@ The modes meet at subsumption: in check mode, synthesize `S`, then require `S <:
 | `Unit` | `Type.Unit` | — | `RefKind` (boxed unit `scala.runtime.BoxedUnit`); value written `()` |
 | `Nothing` | `Type.Nothing` | — | bottom; `Nothing <: T` for all `T` |
 
-- **No implicit numeric widening** (`Int → Long`, etc.); conversions are explicit methods (`n.toLong`). *Judgment call*: kept minimal to avoid coercion complexity local inference handles poorly.
+- **No implicit numeric widening** (`Int → Long`, etc.); every numeric conversion is an **explicit intrinsic method** on the numeric primitive types. *Judgment call*: explicit conversions keep local/bidirectional inference free of coercion guesswork. The full set (compiler intrinsics, always available, no import) is `.toByte`, `.toShort`, `.toChar`, `.toInt`, `.toLong`, `.toFloat`, `.toDouble`, `.toSize` — each a nullary method invoked by selection (`n.toLong`, `x .toDouble`, §4.2), defined on every numeric primitive (`Byte`/`Short`/`Char`/`Int`/`Long`/`Float`/`Double`/`Size`). A conversion to a type's own type is the identity (no op). They lower 1:1 to a single NIR `Op.Conv` (grounded in `nir/.../Convs.scala`):
+
+  | Conversion | NIR `Conv` | Note |
+  |---|---|---|
+  | signed int → wider int (`Byte`/`Short`/`Int` → `Long`, …) | `Sext` | sign-extend |
+  | `Char` → wider int | `Zext` | `Char` is unsigned 16-bit |
+  | int → narrower int (`Long` → `Int`, `Int` → `Byte`, → `Char`, …) | `Trunc` | truncates; may lose bits |
+  | signed int → float (`Int`/`Long` → `Float`/`Double`) | `Sitofp` | |
+  | `Char` → float | `Uitofp` | unsigned source |
+  | float → int (`Double`/`Float` → `Int`/`Long`/…) | `Fptosi` | truncates toward zero |
+  | `Float` → `Double` | `Fpext` | |
+  | `Double` → `Float` | `Fptrunc` | |
+  | int ↔ `Size` | `SSizeCast` / `ZSizeCast` | platform-word resize |
+
+  Float→int conversion follows the backend's `Fptosi` semantics (truncation toward zero; out-of-range/NaN behavior is the backend's, as for Scala Native `Double.toInt`). No rounding-mode control and no checked/saturating variants in the MVP (Open Decision §11.2 now decided for the *core* set; unsigned and `Ptr`/`Size` arithmetic remain open).
 - **`Ptr[T]` is a phantom-parameterized raw pointer.** The type argument `T` records the intended pointee for the frontend (so `Ptr[Byte]` and `Ptr[Int]` are distinct to the typechecker) but carries **no runtime representation**: every `Ptr[T]` erases to the single NIR `Type.Ptr`. Bare `Ptr` is shorthand for `Ptr[Byte]`; `CString` is the alias `Ptr[Byte]`. The struct-field rule (§6.3) admits any `Ptr[_]` — it is a raw word, not a managed reference (the *boxed* `scala.scalanative.unsafe.Ptr`, a `RefKind`, remains rejected). Pointer arithmetic / load / store beyond FFI use through `c"..."` is otherwise unspecified in the MVP (Open Decision §11.2).
 - **Bitwise & shift methods** — All integer primitive types have built-in methods `.and`, `.or`, `.xor`, `.shl`, `.shr`, `.ushr`, `.not` that lower directly to NIR `Op.Bin` nodes (§7.15). These are compiler intrinsics, always available without an import. Following the general chain-selection idiom (§4.2), they are used in operator style: `34 .or 1`, `flags .and mask`, `x .shl 2`.
 - **Boxing**: a primitive used where a reference type is expected (stored in `Array[Object]`, a union, or a generic at a reference type) is boxed to its canonical box class (`java.lang.Integer`, …) per the NIR box/unbox tables; inserted by the elaborator.
 - `String` is the reference type `java.lang.String` (4 fields `value, offset, count, cachedHashCode`). `Array[T]` is `Type.Array(elemTy)`; arrays are built with literals `[e1, …, en]` (§5.6) or runtime allocation, and accessed with the built-in members `xs.get i`, `xs.set i v`, `xs.length` (lowering to `Op.Arrayload`/`Op.Arraystore`/`Op.Arraylength`, §8.9). Indexing sugar `xs[i]` is reserved (§2.2).
 - **`Array[T]` also has a built-in `foreach`** — `xs.foreach (f: T -> Unit): Unit` — a compiler intrinsic that lowers to a counted index loop (`Op.Arraylength` bound, `Op.Arrayload` per step, then applying `f`), **not** part of the deferred fluent collections API (§2.2). It exists so the MVP `for x in xs do …` form (§7.12) iterates arrays out of the box; the richer `map`/`filter`/`fold` surface still awaits the collections milestone. (`String` exposes no `foreach` in the MVP — iterate `s.length` with explicit char access if needed.)
-- **`Null` and nullability (surface decision).** MVP reference types are **nullable** (mirroring the backend `Type.Ref.nullable`). `null` arises only from interop/runtime, has type `Null <: R` for every reference type `R`, and dereferencing it throws `NullPointerException` (§7).
+- **`Null` and nullability (surface decision).** MVP reference types are **nullable** (mirroring the backend `Type.Ref.nullable`). `null` arises only from interop/runtime, has type `Null <: R` for every reference type `R`, and dereferencing it throws `NullPointerException` (§7). *Non-null-by-default with flow narrowing (the Kotlin model) is a deferred, high-value but large type-system project — [proposals/non-null-types.md](proposals/non-null-types.md); it erases to the same nullable `Type.Ref`, so the cost is type-checker-only.*
 
 ### 6.3 Struct (value) vs. Class (reference)
 
@@ -1175,7 +1195,7 @@ Hi is **expression-oriented**: every construct produces a value (possibly `Unit`
 ### 7.2 `val` and `var` bindings
 
 - **`val`** binds an immutable name; the RHS is evaluated once when control reaches it. A `val`'s left side may be an irrefutable pattern; a refutable pattern is a **compile error** (use `match`).
-- **`var`** binds a mutable cell; reassignment `name = expr` has type `Unit`. **`var` is local-only** in the MVP: object/module-level mutable `var` fields are deferred (model module state as a `class` with a `var` field). Class/struct **fields** may be `var`. Local `var` lowers to an SSA `Op.Var` slot; a mutable field lowers to `Op.Fieldstore`.
+- **`var`** binds a mutable cell; reassignment `name = expr` has type `Unit`. `var` is permitted as a **local** binding, a **class/struct field**, and an **`object`/module-level field** (§8.5). Local `var` lowers to an SSA `Op.Var` slot; a mutable field (instance or module) lowers to `Op.Fieldstore`. A module-level `var` is **unsynchronized after init** — its initializer runs lazily on first module access through the thread-safe loader (the same path as an `object` `val`, §8.5), but subsequent reads/writes are plain field accesses with no memory barrier, exactly as for a Scala `object var` or a Go package variable. Programs that mutate module state from multiple threads must synchronize explicitly (the concurrency model is OS/virtual threads, §1.1).
 
 Immutability is *binding-level*, not deep: a `val` to a mutable `class` still permits its fields to mutate. Value `struct`s are copied on bind/assign.
 
@@ -1330,7 +1350,7 @@ fun checked (n: Int): Int =
   if n >= 0 then n else throw IllegalArgumentException("negative")
 ```
 
-**`try e catch { | P => h … }`.** Evaluate `e`. On normal completion its value is the result. If `e` throws `v <: Throwable`, handler clauses are tried top to bottom; each `| P => h` matches `v` (typically a typed pattern `ex : SomeException`, but any `match` pattern form is allowed). The first match binds and evaluates `h`; its value is the result. If none match, `v` re-propagates. The result type is the LUB of `e` and all handler bodies (subject to §7.4 join rules). **No `finally` in the MVP.** A clause pattern whose type is not `<: Throwable` is a compile error.
+**`try e catch { | P => h … }`.** Evaluate `e`. On normal completion its value is the result. If `e` throws `v <: Throwable`, handler clauses are tried top to bottom; each `| P => h` matches `v` (typically a typed pattern `ex : SomeException`, but any `match` pattern form is allowed). The first match binds and evaluates `h`; its value is the result. If none match, `v` re-propagates. The result type is the LUB of `e` and all handler bodies (subject to §7.4 join rules). **No `finally` in the MVP** (deferred — [proposals/exceptions-finally.md](proposals/exceptions-finally.md); it reuses the existing unwind machinery, the work is its interaction with `return`/`break`/`continue`). A clause pattern whose type is not `<: Throwable` is a compile error.
 
 ```hi
 val v =
@@ -1347,7 +1367,10 @@ Lowering uses NIR landing pads (`Next.Unwind`), dispatching the caught value thr
 
 - **`while c do e`** evaluates `c : Bool`; while it is `true`, evaluates `e` (value discarded) and re-tests. Result type `Unit`. Lowering: a header block testing `c` (`Inst.If`) and a body block ending in a back-edge `Inst.Jump` to the header; mutable locals are `Op.Var` slots (§8.1), so no phi-threading is required.
 - **`for x in e do body`** is **pure sugar**, desugared before typing to `e.foreach { x => body }`. It therefore works for any receiver whose type has a `foreach` method or extension of type `(T -> Unit) -> Unit`. **In the MVP this includes `Array[T]`**, whose built-in `foreach` intrinsic (§6.2) makes `for x in xs do …` iterate arrays with no collections library; user types that define a `foreach` work identically. Result type `Unit`. Multiple generators, guards, pattern binders, and `for … yield` are deferred to the collections milestone (§2.2).
-- **`break`/`continue` do not exist** in the MVP (keywords reserved, §3.5); exit early with `return`, a flag `var`, or restructuring.
+- **`break` and `continue`** (§3.5) are loop control statements, valid only inside the body of an enclosing loop. `break` terminates the innermost loop; `continue` abandons the current iteration and proceeds to the next. Both have type `Nothing` (so they compose in branches: `if done then break`), and statements after an unconditional `break`/`continue` in the same block are an "unreachable code" compile error (§5.4). Like `return`, they **may not cross a closure boundary**.
+  - In a **`while`** body, `continue` is an `Inst.Jump` to the loop header (re-test the condition) and `break` an `Inst.Jump` to the loop's exit (join) block.
+  - In a **`for` over an `Array`** — the MVP's intrinsic iteration (§6.2) — the loop lowers to the same counted index loop `Array.foreach` uses, and `break`/`continue` jump to its exit / increment step directly. To make this work the front end **suppresses the `foreach` desugaring when the `for` body contains a (non-closure-nested) `break`/`continue`**, emitting the counted loop inline so the body is *not* wrapped in a closure; `for` is then a true loop for control-flow purposes, not merely sugar.
+  - In a **`for` over a user-defined `foreach`** (a real method taking a `T -> Unit` closure), the body genuinely becomes a closure, so a `break`/`continue` targeting the `for` loop would cross a closure boundary and is a **compile error** in the MVP (non-local control is deferred, §2.2). Such a loop still iterates; it simply cannot `break`/`continue`. (The error names the closure boundary and suggests `while` + an explicit index, or a flag `var`.)
 - **No tail-call guarantee.** Hi does not guarantee tail-call elimination (Interflow may inline or optimize, but it is not a language guarantee). Use `while`/`for` for unbounded iteration; recursion is for naturally tree-shaped or bounded-depth structure.
 
 ```hi
@@ -1392,6 +1415,7 @@ fun indexOf (xs: Array[Int]) (x: Int): Int = {
 | `while c do e` | `c`; if `true`: `e`, then re-test (loop) |
 | `for x in e do b` | desugars to `e.foreach { x => b }` |
 | `return e` | `e`, then exit the enclosing `fun` |
+| `break` / `continue` | jump out of / to the next iteration of the innermost loop (no operand) |
 | `e match { … }` | `e` once; arms top-to-bottom; guard after structural match |
 | `f a b` | `f`, then `a`, then `b`, then call |
 | `recv.m args` | `recv`, then args L-to-R, then dispatch |
@@ -1478,7 +1502,7 @@ Later application of an eta-expanded value goes through the SAM `apply` (`Op.Met
 
 > **Judgment call.** Hi closures `{ (x, y) => e }` lower to a single `scala.FunctionN` SAM (not nested `Function1`s); named `fun` currying still flattens to one method.
 
-**Blocks, expression statements, `return`, and loops.** A block lowers to a straight-line sequence of NIR instructions in textual order; a non-final expression statement is evaluated and its result discarded (no extra cost). `val`/`var` bindings introduce SSA locals (`var` becomes a mutable `Op.Var` slot). The block's value is its final expression statement's value (else `Unit`), feeding the enclosing `Inst.Ret` or the join-point SSA value. **`return e`** lowers to `Inst.Ret(v)` at the point of occurrence — NIR functions may carry multiple return blocks; there is no cleanup interaction because the MVP has no `finally`. **`while`** lowers to a header block (`Inst.If` on the condition) and a body block ending in a back-edge `Inst.Jump` to the header; mutated locals live in `Op.Var` slots, so no phi-threading is needed. **`for`** is desugared to a `foreach` call before lowering (§7.12).
+**Blocks, expression statements, `return`, and loops.** A block lowers to a straight-line sequence of NIR instructions in textual order; a non-final expression statement is evaluated and its result discarded (no extra cost). `val`/`var` bindings introduce SSA locals (`var` becomes a mutable `Op.Var` slot). The block's value is its final expression statement's value (else `Unit`), feeding the enclosing `Inst.Ret` or the join-point SSA value. **`return e`** lowers to `Inst.Ret(v)` at the point of occurrence — NIR functions may carry multiple return blocks; there is no cleanup interaction because the MVP has no `finally`. **`while`** lowers to a header block (`Inst.If` on the condition) and a body block ending in a back-edge `Inst.Jump` to the header; mutated locals live in `Op.Var` slots, so no phi-threading is needed. **`break`** is an `Inst.Jump` to the loop's exit (join) block and **`continue`** an `Inst.Jump` to the header (or, for an array `for`, the increment step), §7.12. **`for`** is desugared to a `foreach` call before lowering (§7.12) — *except* an array `for` whose body contains a loop-local `break`/`continue`, which lowers to the inline counted index loop so the body is not wrapped in a closure (a closure boundary blocks `break`/`continue`, §7.12).
 
 **SAM conversion (§7.6).** When a closure is checked against a single-abstract-method trait `T`, step 1 above sets `traits = Seq(T)` (instead of `scala.FunctionN`) and step 4's body method takes `T`'s abstract-method signature; captures and the constructor are unchanged. This is the same shape dotty emits for Java functional interfaces — NIR needs nothing new — and it is what makes `Runnable`-taking javalib APIs (threads, executors, virtual threads) directly callable with Hi closures.
 
@@ -1499,7 +1523,7 @@ Instantiation `C(1, n)` → `Op.Classalloc(C, zone = None)` then a ctor `Op.Call
 
 > **Constructor as a first-class value (v0.3).** Because `T` is a constructor function (§7.7), a **direct** application `C(1, n)` lowers straight to `Op.Classalloc` + ctor `Op.Call` (no closure). When `T` is used **bare** as a value (`xs.map Some`, `val mk = Node`), it eta-expands exactly like an under-applied `fun` (§8.1): a synthesized `scala.FunctionN` whose `apply` performs the `Op.Classalloc` + ctor. Positional `T(e1, …, en)` fills fields in declaration order; named `T(f = e, …)` by name; both must cover every field. Nullary variants stay singleton modules (§8.3), not functions.
 
-> **Judgment call.** Hi `var` is in the MVP, minimal: mutable field → `Defn.Var` + setter; mutable local → `Op.Var`/`Op.Varstore`/`Op.Varload`. Object/module-level user `var` fields are rejected (§8.5).
+> **Judgment call.** Hi `var` is in the MVP: mutable instance field → `Defn.Var` + setter; mutable local → `Op.Var`/`Op.Varstore`/`Op.Varload`; mutable **module-level** field → a `Defn.Var` on the module singleton + setter (§8.5).
 
 ### 8.3 ADTs → sealed `Defn.Class` hierarchy; `match` → class-id range-test decision tree
 
@@ -1529,7 +1553,7 @@ Front-end-only, erased, reference-types-only.
 
 ### 8.5 `object` / module → `Defn.Module` with lazy init
 
-`object Foo { ... }` → `Defn.Module(Attrs.None, Foo$, parent = Some(Rt.Object.name), traits = …)`. Methods become instance `Defn.Define`s (self `Type.Ref(Foo$)`); `val`s become `Defn.Var` fields set by the module ctor `Sig.Ctor(Seq.empty)`. **A user-declared module-level `var` field is rejected in MVP.**
+`object Foo { ... }` → `Defn.Module(Attrs.None, Foo$, parent = Some(Rt.Object.name), traits = …)`. Methods become instance `Defn.Define`s (self `Type.Ref(Foo$)`); `val`s become `Defn.Var` fields set by the module ctor `Sig.Ctor(Seq.empty)`. **A module-level `var` field** (§7.2) lowers identically — a `Defn.Var` on `Foo$` initialized by the module ctor — but additionally emits a setter `Defn.Define` (`Op.Fieldstore` on the loaded module instance), exactly as a mutable instance field does (§8.2). Reads are `Op.Module(Foo$)` + `Op.Fieldload`; writes are `Op.Module(Foo$)` + `Op.Fieldstore`. There is **no** post-init synchronization: lazy first-access init is thread-safe via the loader (below), but ordinary mutation is unguarded (the Scala `object var` / Go package-var contract, §7.2).
 
 Module access and lazy init are provided by the backend (`Generate.genModuleAccessors`): Hi emits only `Op.Module(Foo$)` at use sites. The synthesized `module$Gload` accessor checks a per-module slot; on first access it `Op.Classalloc`s and calls the ctor; under multithreading it routes through the extern `__scalanative_loadModule(slot, rtti, size, ctor)` (`LoadModuleSig = Function(Seq(Ptr, Ptr, Size, Ptr), Ptr)`) for safe one-time init.
 
@@ -1932,6 +1956,72 @@ fun printf  (fmt: String) (args: Array[Object]): Unit = ...  // java.util.Format
 
 These are package-level `fun`s lowering to `std.io.package$` (§8.5); they delegate to javalib (`java.lang.System.out`, `java.lang.String.format`) by canonical name, so the linker prunes whatever is unused. The varargs idiom is an explicit `Array[Object]` parameter — Hi has no variadic functions; callers write `printf "x=%d\n" [x]` (§5.6), and primitives box at the literal (§6.8). C-variadic functions (libc `printf`) remain reachable via `c"..."`/`scala.scalanative.libc` for FFI but are not part of `std.io`.
 
+#### Hi collections (`std.collections`) — the first-order facade
+
+The MVP ships a small, **self-hosted** collections surface so that the fluent `xs.map(f).filter(p)` pipeline — Hi's headline "more elegant than Go" ergonomic — works without waiting on the deferred container-polymorphic milestone (§2.2). It is deliberately **first-order and invariant**: every signature names concrete `List`/`Array`/`Option` types with method-level type parameters only (`map[B]`), so it requires **neither variance nor higher-kinded types** ([proposals/variance.md](proposals/variance.md), [proposals/higher-kinded-types.md](proposals/higher-kinded-types.md)). It is written in Hi using only locked features — an ADT (§6.7), generics (§6.8), extension methods (§6.10), pattern matching, and `while` — and therefore lowers to ordinary Hi NIR with **no new vocabulary**; it also dogfoods those features end-to-end.
+
+```hi
+package std.collections
+
+// `List` is an ordinary Hi ADT (§6.7) — dogfoods sum types + generics.
+type List[A] = | Nil | Cons(head: A, tail: List[A])
+
+// `Option` lives here too (used pervasively; an ADT like List).
+type Option[A] = | Some(A) | None
+
+// The pipeline is `extension` methods on the concrete types (§6.10), receiver implicit `self`.
+extension [A] List[A] {
+  fun isEmpty: Bool                       = self match { | Nil => true | Cons(_, _) => false }
+  fun length: Int                          // O(n), iterative (stack-safe)
+  fun reverse: List[A]                     // O(n), iterative
+  fun map[B] (f: A -> B): List[B]          // O(n), stack-safe (build reversed, then reverse)
+  fun filter (p: A -> Bool): List[A]       // O(n), stack-safe
+  fun foldLeft[B] (z: B) (f: (B, A) -> B): B   // O(n), iterative; f is an uncurried 2-arg closure
+  fun foreach (f: A -> Unit): Unit         // O(n), iterative — makes `for x in list do …` work (§7.12)
+  fun append (ys: List[A]): List[A]
+}
+
+extension [A] Option[A] {
+  fun map[B] (f: A -> B): Option[B] = self match { | Some(x) => Some(f x) | None => None }
+  fun getOrElse (default: A): A     = self match { | Some(x) => x        | None => default }
+  fun isDefined: Bool               = self match { | Some(_) => true     | None => false }
+}
+
+// Array pipeline built over the `foreach`/`get`/`set`/`length` intrinsics (§6.2).
+extension [A] Array[A] {
+  fun map[B] (f: A -> B): Array[B]             // allocate, fill via a counted loop
+  fun filter (p: A -> Bool): Array[A]
+  fun foldLeft[B] (z: B) (f: (B, A) -> B): B
+}
+
+// Build a List from an array literal: `listOf [1, 2, 3]` (no varargs — the array-literal idiom, §5.6).
+fun listOf[A] (xs: Array[A]): List[A]
+```
+
+- **Stack safety.** `length`, `reverse`, `map`, `filter`, `foldLeft`, and `foreach` are implemented **iteratively** (a `while` loop with a `var` accumulator, last step a `reverse` where order must be preserved), *not* by naïve structural recursion, so they run in O(n) time and O(1) stack on arbitrarily long lists — necessary because Hi gives **no tail-call guarantee** (§7.12). `append` is O(|self|). For very large sequences prefer `Array` (contiguous, `foreach` is a counted loop); `List` is the persistent/immutable structure for small-to-moderate, recursion-shaped data.
+- **Resolution.** `xs.map f` resolves at tier 1/2 of `.m` (§6.10): the extension method on the receiver's static type. Pipelines use chain selection — `xs .map f .filter p .foldLeft 0 add` — each ` .m` re-threads the accumulated value (§4.2). `for x in someList do …` works through `List.foreach` (§7.12).
+- **What is *not* here (deferred, §2.2):** `Map`/`Set`, container-polymorphic returns (a generic `map` whose result container varies), and any variance-dependent subtyping (`List[Cat]` as `List[Animal]`). Those await [variance](proposals/variance.md) + [HKT](proposals/higher-kinded-types.md) and the scalalib-backed milestone.
+
+**Worked pipeline (normative example).**
+
+```hi
+package examples.pipeline
+
+import std.io.println
+import std.collections.{List, listOf}
+
+object Main {
+  fun main (args: Array[String]): Unit = {
+    val xs   = listOf [1, 2, 3, 4, 5, 6]
+    val evens = xs .filter { n => n .and 1 == 0 }   // List(2, 4, 6)
+    val sum   = evens .map { n => n * n } .foldLeft 0 { (acc, n) => acc + n }   // 4 + 16 + 36 = 56
+    println "sum of squares of evens = ${sum}"
+    for n in evens do
+      println "even: ${n}"
+  }
+}
+```
+
 ### 10.3 The handoff: `Seq[nir.Defn]` → native binary
 
 The frontend produces a `Seq[nir.Defn]` per top-level type and writes binary NIR via the existing serializer:
@@ -1995,11 +2085,13 @@ Phases 1–7 are Hi's new code. Phase 8 is entirely the existing Scala Native ba
 
 ## 11. Open Decisions
 
-The following are genuine choices still left to the language designer. (Items the prior review left open but that this spec *decided* — e.g. `var` inclusion, uncurried multi-param closures, return-type annotations, exhaustiveness-as-error — are noted in §2/§6/§7 as judgment calls and are **not** repeated here. The native collections API was decided-deferred (§2.2); closure→SAM conversion was subsequently **promoted into the MVP** (§2.1, §7.6).)
+The following are genuine choices still left to the language designer. (Items the prior review left open but that this spec *decided* — e.g. `var` inclusion, uncurried multi-param closures, return-type annotations, exhaustiveness-as-error — are noted in §2/§6/§7 as judgment calls and are **not** repeated here. The native collections API was **narrowed**: a first-order facade is in the MVP (§2.1, §10.2) and the container-polymorphic surface is decided-deferred (§2.2); closure→SAM conversion was promoted into the MVP (§2.1, §7.6).)
+
+> **Deferred-but-designed features** (distinct from the open decisions below — these are *decided to do later*, with design notes already written so they can be picked up without info loss): higher-kinded types, declaration-site variance, `finally`, and non-null-by-default types. See **[proposals/](proposals/README.md)**. All four are frontend-only at the backend (they erase / reuse existing NIR); the suggested sequencing and ROI are in the proposals index.
 
 1. **I/O surface beyond `std.io`, and companion-`apply` sugar.** `std.io.{print, println, printf}` (§10.2) is the decided MVP entry; the fuller I/O design (stdin, files, errors) and whether `T(...)` on a type with a companion is sugar for a factory `apply` remain unresolved.
 
-2. **Numeric conversions.** With no implicit widening, the exact set and naming of explicit conversion methods (`toLong`, `toDouble`, …) and whether unsigned/`Size`/`Ptr` arithmetic is exposed is unspecified.
+2. **Numeric conversions.** ~~The exact set and naming of explicit conversion methods.~~ **Core set decided (§6.2):** `.toByte`/`.toShort`/`.toChar`/`.toInt`/`.toLong`/`.toFloat`/`.toDouble`/`.toSize` intrinsics on every numeric primitive, each lowering to one NIR `Op.Conv`. **Still open:** whether unsigned arithmetic, checked/saturating conversions, and `Size`/`Ptr` arithmetic beyond FFI are exposed (§11.2 was the placeholder; only the conversion *naming/set* is now closed).
 
 3. ~~**`equals`/`hashCode`/`toString` and structural equality semantics.**~~ **Decided (§7.16).** Value-like types (`struct`, structural record, tuple, ADT) auto-derive structural `equals`/`hashCode` and a canonical `toString`; reference `class`es keep `Object` identity unless they override the members. A user-declared `equals`/`hashCode`/`toString` member always wins. This makes `==`, hash keys, and string interpolation (§3.6) work without boilerplate.
 
@@ -2018,6 +2110,26 @@ The following are genuine choices still left to the language designer. (Items th
 ## Changelog
 
 *Newest first. Each entry is a delta against the previous spec version; `§` references point into the sections above. New versions append a `###` subsection here.*
+
+### v0.7 (from v0.6)
+
+*Four ROI-driven MVP additions that make the slice both more complete and more demonstrative of the "more expressive/elegant than Go" goal — none of which cost anything at the backend (all erase to existing NIR, or lift a self-imposed restriction). Two larger expressiveness features explored in the same design pass — higher-kinded types and declaration-site variance — were judged worth doing but **not MVP-ready** and are captured as standalone proposals (`proposals/`) rather than rushed into the spec.*
+
+**MVP additions:**
+
+- **Module-level `var`.** The restriction was conservatism, not a backend limit: an `object`/module-level `var` lowers to a module `Defn.Var` + setter, exactly like an `object` `val` field (which already ships) plus mutation. It is **unsynchronized after lazy init** (the Scala `object var` / Go package-var contract). Removes a visible "Go quadrant" ergonomic wart. (§2.1, §5.3, §7.2, §8.2, §8.5)
+- **Loop `break`/`continue`.** Promoted from reserved-future to active keywords; valid only in a loop body, type `Nothing`, may not cross a closure boundary. `while` and array-`for` lower the jumps directly (`Inst.Jump` to exit/header); an array `for` whose body uses them suppresses the `foreach`-closure desugaring and emits the inline counted loop; a `for` over a *user* `foreach` cannot `break`/`continue` (closure boundary — a compile error). *Non-local* control across closures stays deferred. (§2.1, §2.2, §3.4, §3.5, §4.1, §5.4, §5.11, §7.12, §7.14, §8.1)
+- **Numeric conversion intrinsics.** The explicit-conversion set is now fixed: `.toByte`/`.toShort`/`.toChar`/`.toInt`/`.toLong`/`.toFloat`/`.toDouble`/`.toSize` on every numeric primitive, each lowering to one NIR `Op.Conv` (`Sext`/`Zext`/`Trunc`/`Sitofp`/`Fptosi`/`Fpext`/`Fptrunc`/`SSizeCast`…, grounded in `Convs.scala`). Closes the naming half of Open Decision §11.2. (§6.2, §11.2)
+- **First-order native collections (`std.collections`).** A self-hosted `List[A]` (a Hi ADT) + `Option[A]` with `map`/`filter`/`foldLeft`/`foreach`/… as **extension methods**, plus an `Array` pipeline over the `foreach` intrinsic. **First-order and invariant**, so it needs neither HKT nor variance, and it lowers to ordinary Hi NIR (dogfooding ADTs/generics/extensions/patterns). This is what finally lets the MVP *show* the fluent `xs.map(f).filter(p)` pipeline — the headline elegance — rather than only ADT/recursion/loop forms. The container-polymorphic, variance/HKT-using, scalalib-backed collections (`Map`/`Set`, builder-generic returns) remain deferred (§2.2). (§2.1, §2.2, §10.2)
+
+**Deferred-work proposals created (no info loss from the design discussion):**
+
+- **`proposals/higher-kinded-types.md`** — HKT is frontend-only (erases like any generic; the bidirectional inference model dodges higher-order unification), so the cost is a kind-checker plus **one real design problem**: the v0.5 implicit-receiver Self-based model assumes the receiver is `Self`, but `Functor`/`Monad` need `Self : * -> *` with receiver `Self[A]`. The proposal works that through (the Scala-3-experimental shape) and is the prerequisite the FP-expressiveness claim ultimately rests on.
+- **`proposals/variance.md`** — declaration-site `[+A]`/`[-A]`, position checking, the `<:`/LUB extension, `Array` stays invariant, coexistence with the reserved use-site `?`. Frontend-only (erases). Highest value paired with the deferred container-polymorphic collections.
+- **`proposals/exceptions-finally.md`** — `finally` and its interaction with `return`/`break`/`continue` unwinding.
+- **`proposals/non-null-types.md`** — non-null-by-default + flow narrowing over the nullable substrate (the Kotlin approach); the one item here that is genuinely large.
+
+**Scope-based `given` resolution reaffirmed** (not global coherence): the asc/desc `Ord for Int` case is the canonical reason; the closed-world linker keeps the candidate set known. (No change — §6.10.)
 
 ### v0.6 (from v0.5)
 

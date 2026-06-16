@@ -154,7 +154,7 @@ object Main {
 }
 ```
 
-The closure `{ u => x.show }` captures the value `x` and (via the `[A: Show]` bound) its resolved dictionary. Each `AnyShow` is a uniform reference type, so `Array[AnyShow]` is fine, and `s.show` calls through the captured dictionary. This is exactly a `Box<dyn Show>` / `any Show` — built explicitly. *(`for s in xs do …` iterates the array via the built-in `Array.foreach` intrinsic — [spec §6.2](spec.md), [§7.12](spec.md); the deferred part is the fluent `map`/`filter`/`fold` pipeline, not basic iteration.)*
+The closure `{ u => x.show }` captures the value `x` and (via the `[A: Show]` bound) its resolved dictionary. Each `AnyShow` is a uniform reference type, so `Array[AnyShow]` is fine, and `s.show` calls through the captured dictionary. This is exactly a `Box<dyn Show>` / `any Show` — built explicitly. *(`for s in xs do …` iterates the array via the built-in `Array.foreach` intrinsic — [spec §6.2](spec.md), [§7.12](spec.md). As of v0.7 a first-order `List`/`Option`/`Array` pipeline — `map`/`filter`/`foldLeft` — also ships in `std.collections` ([spec §10.2](spec.md)); what remains deferred is only the container-polymorphic, variance/HKT-using collection hierarchy ([spec §2.2](spec.md)).)*
 
 ### After `Dyn[Show]` — compiler-synthesized
 
